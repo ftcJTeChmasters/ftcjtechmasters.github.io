@@ -68,7 +68,7 @@ const seedUsers = [
     email: "lee@team.local",
     password: "demo123",
     role: "Member",
-    section: "Programming",
+    section: "Marketing and Communications",
     score: START_SCORE,
   },
 ];
