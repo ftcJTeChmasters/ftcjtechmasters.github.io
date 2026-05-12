@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>About | JTeChmasters</title>
+    <link rel="stylesheet" href="../styles.css" />
+    <script src="https://unpkg.com/lucide@latest" defer></script>
+    <script src="../app.js" defer></script>
+  </head>
+  <body>
+    <main id="public-site" class="public-site">
+      <header class="public-topbar">
+        <a class="brand brand-link" href="../">
+          <img class="brand-logo" src="../assets/jtechmasters-logo.svg" alt="JTeChmasters logo" />
+          <div>
+            <strong>JTeChmasters</strong>
+            <small>FTC robotics team</small>
+          </div>
+        </a>
+        <nav class="public-nav" aria-label="Public pages">
+          <a href="../">Home</a>
+          <a href="../blogs/">Blogs</a>
+          <a href="./" aria-current="page">About</a>
+          <a class="primary-btn" href="../">
+            <i data-lucide="lock-keyhole"></i>
+            Member login
+          </a>
+        </nav>
+      </header>
+
+      <section class="page-hero">
+        <p class="eyebrow">About Us</p>
+        <h1 id="about-page-title">About JTeChmasters</h1>
+        <p id="public-about-summary" class="muted"></p>
+        <div id="public-social-links" class="social-links" aria-label="Team links"></div>
+      </section>
+
+      <section id="public-about" class="public-about public-about-page" aria-label="About JTeChmasters"></section>
+    </main>
+  </body>
+</html>

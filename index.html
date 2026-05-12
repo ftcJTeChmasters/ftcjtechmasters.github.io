@@ -18,44 +18,30 @@
             <small>FTC robotics team</small>
           </div>
         </div>
-        <button id="open-login" class="primary-btn">
-          <i data-lucide="lock-keyhole"></i>
-          Member login
-        </button>
+        <nav class="public-nav" aria-label="Public pages">
+          <a href="index.html">Home</a>
+          <a href="blogs/">Blogs</a>
+          <a href="about/">About</a>
+          <button id="open-login" class="primary-btn">
+            <i data-lucide="lock-keyhole"></i>
+            Member login
+          </button>
+        </nav>
       </header>
 
       <section class="public-hero">
         <div>
           <p class="eyebrow">Team Updates</p>
           <h1>Building robots, code, media, and match-day momentum.</h1>
-          <p class="muted">
-            Public posts from the JTeChmasters team: updates, links, photos, and build notes.
-          </p>
+          <p id="public-about-summary" class="muted"></p>
+          <div id="public-social-links" class="social-links" aria-label="Team links"></div>
         </div>
       </section>
 
-      <section class="public-grid" aria-label="Public team posts">
-        <article class="post-card featured">
-          <span class="badge">Update</span>
-          <h2>Season planning is underway</h2>
-          <p>Engineering, media, and outreach are preparing their first sprint goals for the new FTC season.</p>
-        </article>
-        <article class="post-card">
-          <span class="badge">Link</span>
-          <h3>FTC resources</h3>
-          <p>Game manuals, inspection docs, and official season resources will be shared here.</p>
-          <a href="https://www.firstinspires.org/robotics/ftc" target="_blank" rel="noreferrer">Open FIRST FTC</a>
-        </article>
-        <article class="post-card photo-post">
-          <span class="badge">Photo</span>
-          <div class="photo-placeholder">Team photo</div>
-          <p>Photos from workshops, scrimmages, and outreach events can be posted here.</p>
-        </article>
-        <article class="post-card">
-          <span class="badge">Blog</span>
-          <h3>Build log</h3>
-          <p>Short public blog posts can summarize robot progress without exposing member-only operations.</p>
-        </article>
+      <section id="public-about" class="public-about" aria-label="About JTeChmasters"></section>
+
+      <section id="public-posts" class="public-grid" aria-label="Public team posts">
+        <div class="empty-state">Loading team posts...</div>
       </section>
     </main>
 
@@ -124,6 +110,10 @@
           <button class="nav-item" data-view="portfolio">
             <i data-lucide="folder-kanban"></i>
             Portfolio
+          </button>
+          <button class="nav-item" data-view="site">
+            <i data-lucide="globe"></i>
+            Public Site
           </button>
         </nav>
         <button id="reset-demo" class="ghost-btn">

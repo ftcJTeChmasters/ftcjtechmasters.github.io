@@ -41,6 +41,10 @@ button {
   display: none !important;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 .public-site {
   min-height: 100vh;
 }
@@ -53,6 +57,29 @@ button {
   padding: 18px clamp(16px, 5vw, 56px);
   border-bottom: 1px solid var(--line);
   background: #fbfbf7;
+}
+
+.public-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.public-nav a:not(.primary-btn) {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  border-radius: 6px;
+  color: var(--ink);
+  padding: 7px 10px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.public-nav a[aria-current="page"] {
+  background: var(--panel-strong);
 }
 
 .public-hero {
@@ -70,11 +97,122 @@ button {
   font-size: 1.08rem;
 }
 
+.page-hero {
+  display: grid;
+  gap: 14px;
+  padding: clamp(32px, 7vw, 78px) clamp(16px, 5vw, 56px) 30px;
+}
+
+.page-hero h1 {
+  margin-bottom: 0;
+}
+
+.social-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.social-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--ink);
+  padding: 7px 12px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.public-about {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.55fr) minmax(0, 1fr);
+  gap: 28px;
+  padding: 28px clamp(16px, 5vw, 56px);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: #fbfbf7;
+}
+
+.public-about p {
+  margin-bottom: 0;
+  color: var(--muted);
+  font-size: 1.02rem;
+  line-height: 1.55;
+}
+
+.public-about-page {
+  margin-top: 0;
+}
+
 .public-grid {
   display: grid;
   grid-template-columns: 1.2fr repeat(3, minmax(0, 1fr));
   gap: 18px;
-  padding: 0 clamp(16px, 5vw, 56px) 48px;
+  padding: 28px clamp(16px, 5vw, 56px) 48px;
+}
+
+.public-grid-page {
+  grid-template-columns: 1fr;
+}
+
+.post-section {
+  display: grid;
+  gap: 16px;
+}
+
+.post-section-featured {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.section-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.section-heading h2 {
+  margin: 0;
+}
+
+.blog-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.blog-preview-grid .post-card.featured {
+  grid-column: span 2;
+}
+
+.update-list {
+  display: grid;
+  gap: 12px;
+}
+
+.update-card {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.45fr) minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: start;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 14px;
+}
+
+.update-card h3 {
+  margin: 8px 0 0;
+}
+
+.update-card p {
+  margin: 0;
+  color: var(--muted);
 }
 
 .post-card {
@@ -105,6 +243,62 @@ button {
 .post-card a {
   color: var(--ink);
   font-weight: 800;
+}
+
+.post-card.featured a {
+  color: #fff;
+}
+
+.post-card small {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.post-card.featured small {
+  color: #ececec;
+}
+
+.blog-article {
+  width: min(860px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: clamp(32px, 6vw, 72px) 0;
+}
+
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 24px;
+  color: var(--ink);
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.blog-article-header {
+  display: grid;
+  gap: 12px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--line);
+}
+
+.blog-article-header h1 {
+  margin-bottom: 0;
+}
+
+.blog-article-body {
+  display: grid;
+  gap: 18px;
+  padding: 28px 0;
+  font-size: 1.08rem;
+  line-height: 1.7;
+}
+
+.blog-article-body p {
+  margin: 0;
+}
+
+.article-link {
+  width: fit-content;
 }
 
 .photo-placeholder {
@@ -192,6 +386,13 @@ h3 {
 label {
   display: grid;
   gap: 7px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.form-hint {
+  margin: 0;
   color: var(--muted);
   font-size: 0.9rem;
   font-weight: 700;
@@ -291,6 +492,11 @@ button svg {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.brand-link {
+  color: inherit;
+  text-decoration: none;
 }
 
 .brand-logo {
@@ -461,6 +667,17 @@ tr:last-child td {
   gap: 14px;
 }
 
+.social-editor {
+  display: grid;
+  gap: 10px;
+}
+
+.social-editor-grid {
+  display: grid;
+  grid-template-columns: 0.8fr 1.2fr;
+  gap: 10px;
+}
+
 .full {
   grid-column: 1 / -1;
 }
@@ -555,7 +772,21 @@ tr:last-child td {
   .app-shell,
   .grid.two,
   .grid.three,
-  .public-grid {
+  .public-about,
+  .public-grid,
+  .public-grid-page {
+    grid-template-columns: 1fr;
+  }
+
+  .blog-preview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .blog-preview-grid .post-card.featured {
+    grid-column: auto;
+  }
+
+  .update-card {
     grid-template-columns: 1fr;
   }
 
@@ -594,6 +825,10 @@ tr:last-child td {
     grid-template-columns: 1fr;
   }
 
+  .social-editor-grid {
+    grid-template-columns: 1fr;
+  }
+
   .nav-list {
     grid-template-columns: 1fr;
   }
@@ -605,5 +840,14 @@ tr:last-child td {
   .public-topbar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .public-nav {
+    justify-content: stretch;
+  }
+
+  .public-nav a,
+  .public-nav button {
+    flex: 1 1 auto;
   }
 }
