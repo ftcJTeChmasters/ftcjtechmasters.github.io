@@ -2,6 +2,9 @@
 
 const STORAGE_KEY = "robotics-attendance-hub-v1";
 const SESSION_KEY = "robotics-attendance-session";
+const GIT_SYNC_KEY = "robotics-attendance-git-sync";
+const SUPABASE_SYNC_KEY = "robotics-attendance-supabase-sync";
+const SUPABASE_STATE_ID = "main";
 const MAX_SCORE = 7;
 const START_SCORE = 2;
 const WARNING_THRESHOLD = 0;
@@ -203,6 +206,11 @@ const defaultDb = () => {
 let db = loadDb();
 let currentUser = getSessionUser();
 let currentView = "dashboard";
+let gitAutosaveTimer = null;
+let gitAutosaveBusy = false;
+let supabaseAutosaveTimer = null;
+let supabaseAutosaveBusy = false;
+let supabaseInitialLoadDone = false;
 
 const viewRoot = document.querySelector("#view-root");
 const viewTitle = document.querySelector("#view-title");
@@ -212,6 +220,7 @@ document.addEventListener("DOMContentLoaded", () => {
   wireChrome();
   renderPublicSite();
   showAuthState();
+  loadDbFromSupabase();
 });
 
 function loadDb() {
@@ -294,6 +303,8 @@ function migrateDb(source) {
 
 function saveDb() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+  scheduleSupabaseAutosave();
+  scheduleGitAutosave();
 }
 
 function getSessionUser() {
@@ -1183,11 +1194,18 @@ function renderSiteManager() {
         </form>`,
       )}
     </div>
+    ${currentUser.role === "Coach" ? renderSupabaseSyncPanel() : ""}
+    ${currentUser.role === "Coach" ? renderGitSyncPanel() : ""}
     ${panel("Published Posts", renderPostManagerList())}
   `;
 
   document.querySelector("#about-form").addEventListener("submit", handleSaveAbout);
   document.querySelector("#public-post-form").addEventListener("submit", handlePublishPost);
+  document.querySelector("#supabase-sync-form")?.addEventListener("submit", handleSaveSupabaseSync);
+  document.querySelector("#supabase-load-now")?.addEventListener("click", () => loadDbFromSupabase(true));
+  document.querySelector("#supabase-save-now")?.addEventListener("click", () => saveDbToSupabase(true));
+  document.querySelector("#git-sync-form")?.addEventListener("submit", handleSaveGitSync);
+  document.querySelector("#git-sync-now")?.addEventListener("click", () => syncDbToGitHub(true));
   document.querySelectorAll(".delete-post").forEach((button) => {
     button.addEventListener("click", () => {
       const post = db.publicPosts.find((item) => item.id === button.dataset.post);
@@ -1216,6 +1234,124 @@ function renderSocialInputs(socials) {
         .join("")}
     </div>
   `;
+}
+
+function renderGitSyncPanel() {
+  const config = getGitSyncConfig();
+  return panel(
+    "Git Autosave",
+    `<form id="git-sync-form" class="form-grid">
+      <label class="checkbox-label full"><input name="enabled" type="checkbox" ${config.enabled ? "checked" : ""}> Autosave app data to GitHub</label>
+      <label>Owner<input name="owner" value="${escapeHtml(config.owner)}" placeholder="ftcJTeChmasters" required></label>
+      <label>Repository<input name="repo" value="${escapeHtml(config.repo)}" placeholder="FTC_32722_JTeChmasters_WEB" required></label>
+      <label>Branch<input name="branch" value="${escapeHtml(config.branch)}" placeholder="master" required></label>
+      <label>Data path<input name="path" value="${escapeHtml(config.path)}" placeholder="data/db.json" required></label>
+      <label class="full">GitHub token<input name="token" type="password" placeholder="${config.token ? "Token saved in this browser" : "Fine-grained token with Contents read/write"}"></label>
+      <p class="form-hint full">This writes the LocalStorage database to GitHub as JSON. The token is kept only in this browser and is never saved into the repo.</p>
+      <button class="primary-btn" type="submit"><i data-lucide="save"></i>Save sync settings</button>
+      <button id="git-sync-now" class="small-btn" type="button"><i data-lucide="refresh-cw"></i>Sync now</button>
+      <p id="git-sync-status" class="form-hint full">${escapeHtml(config.status || "Not synced yet.")}</p>
+    </form>`,
+  );
+}
+
+function renderSupabaseSyncPanel() {
+  const config = getSupabaseSyncConfig();
+  return panel(
+    "Supabase Backend",
+    `<form id="supabase-sync-form" class="form-grid">
+      <label class="checkbox-label full"><input name="enabled" type="checkbox" ${config.enabled ? "checked" : ""}> Use Supabase as shared backend</label>
+      <label class="full">Project URL<input name="url" value="${escapeHtml(config.url)}" placeholder="https://your-project.supabase.co"></label>
+      <label class="full">Anon key<input name="anonKey" type="password" placeholder="${config.anonKey ? "Anon key saved in this browser" : "Supabase anon public key"}"></label>
+      <label>Table<input name="table" value="${escapeHtml(config.table)}" placeholder="app_state"></label>
+      <label>State row id<input name="stateId" value="${escapeHtml(config.stateId)}" placeholder="main"></label>
+      <p class="form-hint full">Create the table from the README SQL first. The anon key is stored only in this browser.</p>
+      <button class="primary-btn" type="submit"><i data-lucide="save"></i>Save backend settings</button>
+      <button id="supabase-load-now" class="small-btn" type="button"><i data-lucide="download-cloud"></i>Load from Supabase</button>
+      <button id="supabase-save-now" class="small-btn" type="button"><i data-lucide="upload-cloud"></i>Save to Supabase</button>
+      <p id="supabase-sync-status" class="form-hint full">${escapeHtml(config.status || "Not connected yet.")}</p>
+    </form>`,
+  );
+}
+
+function getSupabaseSyncConfig() {
+  const fallback = {
+    enabled: false,
+    url: "",
+    anonKey: "",
+    table: "app_state",
+    stateId: SUPABASE_STATE_ID,
+    status: "",
+  };
+  try {
+    return { ...fallback, ...JSON.parse(localStorage.getItem(SUPABASE_SYNC_KEY)) };
+  } catch {
+    return fallback;
+  }
+}
+
+function setSupabaseSyncConfig(config) {
+  localStorage.setItem(SUPABASE_SYNC_KEY, JSON.stringify(config));
+}
+
+function handleSaveSupabaseSync(event) {
+  event.preventDefault();
+  if (currentUser.role !== "Coach") return;
+  const existing = getSupabaseSyncConfig();
+  const form = new FormData(event.currentTarget);
+  const anonKey = form.get("anonKey").trim() || existing.anonKey;
+  const config = {
+    enabled: form.get("enabled") === "on",
+    url: form.get("url").trim().replace(/\/+$/, ""),
+    anonKey,
+    table: form.get("table").trim() || "app_state",
+    stateId: form.get("stateId").trim() || SUPABASE_STATE_ID,
+    status: anonKey ? "Supabase settings saved." : "Supabase settings saved, but no anon key is configured.",
+  };
+  setSupabaseSyncConfig(config);
+  renderSiteManager();
+  if (config.enabled && config.url && anonKey) loadDbFromSupabase(true);
+}
+
+function getGitSyncConfig() {
+  const fallback = {
+    enabled: false,
+    owner: "ftcJTeChmasters",
+    repo: "FTC_32722_JTeChmasters_WEB",
+    branch: "master",
+    path: "data/db.json",
+    token: "",
+    status: "",
+  };
+  try {
+    return { ...fallback, ...JSON.parse(localStorage.getItem(GIT_SYNC_KEY)) };
+  } catch {
+    return fallback;
+  }
+}
+
+function setGitSyncConfig(config) {
+  localStorage.setItem(GIT_SYNC_KEY, JSON.stringify(config));
+}
+
+function handleSaveGitSync(event) {
+  event.preventDefault();
+  if (currentUser.role !== "Coach") return;
+  const existing = getGitSyncConfig();
+  const form = new FormData(event.currentTarget);
+  const token = form.get("token").trim() || existing.token;
+  const config = {
+    enabled: form.get("enabled") === "on",
+    owner: form.get("owner").trim(),
+    repo: form.get("repo").trim(),
+    branch: form.get("branch").trim(),
+    path: form.get("path").trim().replace(/^\/+/, ""),
+    token,
+    status: token ? "Sync settings saved." : "Sync settings saved, but no token is configured.",
+  };
+  setGitSyncConfig(config);
+  renderSiteManager();
+  if (config.enabled && token) syncDbToGitHub(true);
 }
 
 function handleSaveAbout(event) {
@@ -1585,6 +1721,193 @@ function formatDelta(delta) {
   const value = Number(delta);
   if (value === 0) return "0";
   return `${value > 0 ? "+" : ""}${value}`;
+}
+
+function scheduleSupabaseAutosave() {
+  const config = getSupabaseSyncConfig();
+  if (!supabaseInitialLoadDone || !config.enabled || !config.url || !config.anonKey) return;
+  clearTimeout(supabaseAutosaveTimer);
+  supabaseAutosaveTimer = setTimeout(() => saveDbToSupabase(false), 1000);
+}
+
+async function loadDbFromSupabase(manual = false) {
+  const config = getSupabaseSyncConfig();
+  if (!config.enabled && !manual) return;
+  if (!isSupabaseConfigured(config)) {
+    updateSupabaseStatus("Supabase is missing a project URL or anon key.");
+    return;
+  }
+  updateSupabaseStatus("Loading data from Supabase...");
+  try {
+    const response = await fetch(supabaseRowUrl(config), {
+      headers: supabaseHeaders(config.anonKey),
+    });
+    if (response.status === 404) {
+      updateSupabaseStatus("No Supabase row found yet. Use Save to Supabase once.");
+      supabaseInitialLoadDone = true;
+      return;
+    }
+    if (!response.ok) throw new Error(`Supabase load failed: ${response.status}`);
+    const rows = await response.json();
+    if (!rows.length) {
+      updateSupabaseStatus("No Supabase data found yet. Use Save to Supabase once.");
+      supabaseInitialLoadDone = true;
+      return;
+    }
+    db = migrateDb(rows[0].data);
+    saveDbLocalOnly();
+    currentUser = getSessionUser();
+    renderPublicSite();
+    if (currentUser && viewRoot && viewTitle) render();
+    supabaseInitialLoadDone = true;
+    updateSupabaseStatus(`Loaded from Supabase ${formatDate(new Date().toISOString())}.`);
+  } catch (error) {
+    supabaseInitialLoadDone = true;
+    updateSupabaseStatus(error.message || "Supabase load failed.");
+  }
+}
+
+async function saveDbToSupabase(manual = false) {
+  const config = getSupabaseSyncConfig();
+  if (!config.enabled && !manual) return;
+  if (!isSupabaseConfigured(config)) {
+    updateSupabaseStatus("Supabase is missing a project URL or anon key.");
+    return;
+  }
+  if (supabaseAutosaveBusy) {
+    scheduleSupabaseAutosave();
+    return;
+  }
+  supabaseAutosaveBusy = true;
+  updateSupabaseStatus("Saving data to Supabase...");
+  try {
+    const response = await fetch(supabaseTableUrl(config), {
+      method: "POST",
+      headers: {
+        ...supabaseHeaders(config.anonKey),
+        Prefer: "resolution=merge-duplicates,return=minimal",
+      },
+      body: JSON.stringify({
+        id: config.stateId,
+        data: db,
+        updated_at: new Date().toISOString(),
+      }),
+    });
+    if (!response.ok) throw new Error(`Supabase save failed: ${response.status}`);
+    supabaseInitialLoadDone = true;
+    updateSupabaseStatus(`Saved to Supabase ${formatDate(new Date().toISOString())}.`);
+  } catch (error) {
+    updateSupabaseStatus(error.message || "Supabase save failed.");
+  } finally {
+    supabaseAutosaveBusy = false;
+  }
+}
+
+function saveDbLocalOnly() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+}
+
+function isSupabaseConfigured(config) {
+  return Boolean(config.url && config.anonKey && config.table && config.stateId);
+}
+
+function supabaseTableUrl(config) {
+  return `${config.url}/rest/v1/${encodeURIComponent(config.table)}?on_conflict=id`;
+}
+
+function supabaseRowUrl(config) {
+  return `${config.url}/rest/v1/${encodeURIComponent(config.table)}?id=eq.${encodeURIComponent(config.stateId)}&select=data`;
+}
+
+function supabaseHeaders(anonKey) {
+  return {
+    apikey: anonKey,
+    Authorization: `Bearer ${anonKey}`,
+    "Content-Type": "application/json",
+  };
+}
+
+function updateSupabaseStatus(status) {
+  const config = getSupabaseSyncConfig();
+  setSupabaseSyncConfig({ ...config, status });
+  const statusNode = document.querySelector("#supabase-sync-status");
+  if (statusNode) statusNode.textContent = status;
+}
+
+function scheduleGitAutosave() {
+  const config = getGitSyncConfig();
+  if (!config.enabled || !config.token) return;
+  clearTimeout(gitAutosaveTimer);
+  gitAutosaveTimer = setTimeout(() => syncDbToGitHub(false), 1800);
+}
+
+async function syncDbToGitHub(manual = false) {
+  const config = getGitSyncConfig();
+  if (!config.enabled && !manual) return;
+  if (!config.token || !config.owner || !config.repo || !config.branch || !config.path) {
+    updateGitSyncStatus("Git autosave is missing a token or repository setting.");
+    return;
+  }
+  if (gitAutosaveBusy) {
+    scheduleGitAutosave();
+    return;
+  }
+  gitAutosaveBusy = true;
+  updateGitSyncStatus("Syncing app data to GitHub...");
+  try {
+    const apiUrl = `https://api.github.com/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/contents/${config.path}`;
+    const current = await fetch(`${apiUrl}?ref=${encodeURIComponent(config.branch)}`, {
+      headers: githubHeaders(config.token),
+    });
+    let sha = null;
+    if (current.ok) {
+      const file = await current.json();
+      sha = file.sha;
+    } else if (current.status !== 404) {
+      throw new Error(`GitHub read failed: ${current.status}`);
+    }
+
+    const response = await fetch(apiUrl, {
+      method: "PUT",
+      headers: githubHeaders(config.token),
+      body: JSON.stringify({
+        message: `Autosave app data ${new Date().toISOString()}`,
+        content: base64Encode(JSON.stringify(db, null, 2)),
+        branch: config.branch,
+        ...(sha ? { sha } : {}),
+      }),
+    });
+    if (!response.ok) throw new Error(`GitHub write failed: ${response.status}`);
+    updateGitSyncStatus(`Last synced ${formatDate(new Date().toISOString())}.`);
+  } catch (error) {
+    updateGitSyncStatus(error.message || "Git autosave failed.");
+  } finally {
+    gitAutosaveBusy = false;
+  }
+}
+
+function githubHeaders(token) {
+  return {
+    Accept: "application/vnd.github+json",
+    Authorization: `Bearer ${token}`,
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+}
+
+function updateGitSyncStatus(status) {
+  const config = getGitSyncConfig();
+  setGitSyncConfig({ ...config, status });
+  const statusNode = document.querySelector("#git-sync-status");
+  if (statusNode) statusNode.textContent = status;
+}
+
+function base64Encode(value) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary);
 }
 
 function normalizeUrl(value) {

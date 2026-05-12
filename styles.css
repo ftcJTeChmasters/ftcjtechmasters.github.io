@@ -391,6 +391,16 @@ label {
   font-weight: 700;
 }
 
+.checkbox-label {
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  justify-content: start;
+}
+
+.checkbox-label input {
+  width: auto;
+}
+
 .form-hint {
   margin: 0;
   color: var(--muted);

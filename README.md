@@ -30,6 +30,37 @@ Demo password for every seeded account is `demo123`.
 
 The app stores data in LocalStorage under `robotics-attendance-hub-v1` and the current session in SessionStorage. It is ready for GitHub Pages because there is no build step and no paid backend dependency.
 
+## Supabase Backend
+
+Run this SQL in the Supabase SQL editor, then configure the project URL and anon key in the coach-only Public Site tab:
+
+```sql
+create table if not exists public.app_state (
+  id text primary key,
+  data jsonb not null,
+  updated_at timestamptz not null default now()
+);
+
+alter table public.app_state enable row level security;
+
+create policy "app_state_select"
+on public.app_state for select
+using (id = 'main');
+
+create policy "app_state_insert"
+on public.app_state for insert
+with check (id = 'main');
+
+create policy "app_state_update"
+on public.app_state for update
+using (id = 'main')
+with check (id = 'main');
+```
+
+This uses the public anon key from the browser, so it is convenient but not strong security. For stronger production security, use Supabase Auth and role-based policies instead of public write access.
+
+Coaches can optionally configure Git autosave from the member-only Public Site tab. This writes the browser database to `data/db.json` through the GitHub Contents API using a fine-grained GitHub token with repository Contents read/write permission. The token is stored only in that browser's LocalStorage and is not committed to the repo.
+
 ## GitHub Hosting
 
 GitHub Pages can host this app as a static site, but it cannot run a live backend process or database. GitHub Actions can run scheduled or build jobs, not a public always-on server. Public posts, social links, and the About Us content are therefore stored in the browser for this static version.
