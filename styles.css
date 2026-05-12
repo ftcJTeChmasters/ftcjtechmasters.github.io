@@ -41,6 +41,83 @@ button {
   display: none !important;
 }
 
+.public-site {
+  min-height: 100vh;
+}
+
+.public-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 18px clamp(16px, 5vw, 56px);
+  border-bottom: 1px solid var(--line);
+  background: #fbfbf7;
+}
+
+.public-hero {
+  display: grid;
+  align-items: end;
+  min-height: 48vh;
+  padding: clamp(32px, 7vw, 78px) clamp(16px, 5vw, 56px);
+  background:
+    linear-gradient(90deg, rgba(244, 244, 241, 0.96), rgba(244, 244, 241, 0.68)),
+    url("assets/jtechmasters-logo.svg") right 8vw center / min(38vw, 420px) no-repeat;
+}
+
+.public-hero p {
+  max-width: 680px;
+  font-size: 1.08rem;
+}
+
+.public-grid {
+  display: grid;
+  grid-template-columns: 1.2fr repeat(3, minmax(0, 1fr));
+  gap: 18px;
+  padding: 0 clamp(16px, 5vw, 56px) 48px;
+}
+
+.post-card {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  min-height: 220px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 18px;
+}
+
+.post-card.featured {
+  background: #111;
+  color: #fff;
+}
+
+.post-card.featured .badge {
+  background: #f0a500;
+  color: #111;
+}
+
+.post-card.featured p {
+  color: #ececec;
+}
+
+.post-card a {
+  color: var(--ink);
+  font-weight: 800;
+}
+
+.photo-placeholder {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 4 / 3;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: var(--panel-strong);
+  color: var(--muted);
+  font-weight: 900;
+}
+
 .login-screen {
   min-height: 100vh;
   display: grid;
@@ -140,7 +217,6 @@ textarea {
 .ghost-btn,
 .icon-btn,
 .nav-item,
-.demo-logins button,
 .small-btn,
 .danger-btn {
   display: inline-flex;
@@ -160,7 +236,6 @@ textarea {
 }
 
 .ghost-btn,
-.demo-logins button,
 .small-btn {
   background: #fff;
   border-color: var(--line);
@@ -184,20 +259,6 @@ button svg {
   width: 18px;
   height: 18px;
   flex: 0 0 auto;
-}
-
-.demo-logins {
-  grid-column: 1 / -1;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  align-items: center;
-  border-top: 1px solid var(--line);
-  padding-top: 18px;
-}
-
-.demo-logins .section-label {
-  margin: 0 8px 0 0;
 }
 
 .error-text {
@@ -493,7 +554,8 @@ tr:last-child td {
   .login-panel,
   .app-shell,
   .grid.two,
-  .grid.three {
+  .grid.three,
+  .public-grid {
     grid-template-columns: 1fr;
   }
 
@@ -538,5 +600,10 @@ tr:last-child td {
 
   .user-pill {
     justify-content: space-between;
+  }
+
+  .public-topbar {
+    align-items: stretch;
+    flex-direction: column;
   }
 }

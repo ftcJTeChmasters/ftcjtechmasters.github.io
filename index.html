@@ -3,17 +3,67 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Robotics Team Attendance</title>
+    <title>JTeChmasters</title>
     <link rel="stylesheet" href="styles.css" />
     <script src="https://unpkg.com/lucide@latest" defer></script>
     <script src="app.js" defer></script>
   </head>
   <body>
-    <main id="login-screen" class="login-screen">
+    <main id="public-site" class="public-site">
+      <header class="public-topbar">
+        <div class="brand">
+          <img class="brand-logo" src="assets/jtechmasters-logo.svg" alt="JTeChmasters logo" />
+          <div>
+            <strong>JTeChmasters</strong>
+            <small>FTC robotics team</small>
+          </div>
+        </div>
+        <button id="open-login" class="primary-btn">
+          <i data-lucide="lock-keyhole"></i>
+          Member login
+        </button>
+      </header>
+
+      <section class="public-hero">
+        <div>
+          <p class="eyebrow">Team Updates</p>
+          <h1>Building robots, code, media, and match-day momentum.</h1>
+          <p class="muted">
+            Public posts from the JTeChmasters team: updates, links, photos, and build notes.
+          </p>
+        </div>
+      </section>
+
+      <section class="public-grid" aria-label="Public team posts">
+        <article class="post-card featured">
+          <span class="badge">Update</span>
+          <h2>Season planning is underway</h2>
+          <p>Engineering, media, and outreach are preparing their first sprint goals for the new FTC season.</p>
+        </article>
+        <article class="post-card">
+          <span class="badge">Link</span>
+          <h3>FTC resources</h3>
+          <p>Game manuals, inspection docs, and official season resources will be shared here.</p>
+          <a href="https://www.firstinspires.org/robotics/ftc" target="_blank" rel="noreferrer">Open FIRST FTC</a>
+        </article>
+        <article class="post-card photo-post">
+          <span class="badge">Photo</span>
+          <div class="photo-placeholder">Team photo</div>
+          <p>Photos from workshops, scrimmages, and outreach events can be posted here.</p>
+        </article>
+        <article class="post-card">
+          <span class="badge">Blog</span>
+          <h3>Build log</h3>
+          <p>Short public blog posts can summarize robot progress without exposing member-only operations.</p>
+        </article>
+      </section>
+    </main>
+
+    <main id="login-screen" class="login-screen hidden">
       <section class="login-panel">
         <div>
           <p class="eyebrow">Team Operations</p>
-          <h1>JTeChmasters Attendance Hub</h1>
+          <h1>Member Operations</h1>
           <p class="muted">
             Track meetings, attendance scores, messages, and project work for every section.
           </p>
@@ -33,15 +83,11 @@
             Sign in
           </button>
           <p id="login-error" class="error-text" role="alert"></p>
+          <button id="back-public" class="ghost-btn" type="button">
+            <i data-lucide="arrow-left"></i>
+            Back to public page
+          </button>
         </form>
-
-        <div class="demo-logins">
-          <p class="section-label">Demo Accounts</p>
-          <button data-login="coach@team.local">Coach</button>
-          <button data-login="engineering@team.local">Engineering Head</button>
-          <button data-login="media@team.local">Media Head</button>
-          <button data-login="alex@team.local">Member</button>
-        </div>
       </section>
     </main>
 

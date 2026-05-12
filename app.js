@@ -14,61 +14,75 @@ const attendanceActions = {
 
 const OUTSIDE_MEETING_DELTA = 0.025;
 
-const sections = ["Engineering", "Media", "Marketing and Communications"];
+const DEFAULT_PASSWORD_HASH = "d3ad9315b7be5dd53b31a273b3b3aba5defe700808305aa16a3062b76658a791";
+
+const sectionDefinitions = [
+  { name: "Engineering", subsections: ["Programming", "CAD", "Build"] },
+  { name: "Media", subsections: ["Photography", "Video", "Design"] },
+  { name: "Marketing and Communications", subsections: ["Outreach", "Sponsors", "Social Media"] },
+];
+
+const sections = sectionDefinitions.map((section) => section.name);
 
 const seedUsers = [
   {
     id: "u-coach",
     name: "Morgan Coach",
     email: "coach@team.local",
-    password: "demo123",
+    passwordHash: DEFAULT_PASSWORD_HASH,
     role: "Coach",
     section: "All",
+    subsection: "All",
     score: MAX_SCORE,
   },
   {
     id: "u-eng-head",
     name: "Sam Engineering",
     email: "engineering@team.local",
-    password: "demo123",
+    passwordHash: DEFAULT_PASSWORD_HASH,
     role: "Section Head",
     section: "Engineering",
+    subsection: "All",
     score: START_SCORE,
   },
   {
     id: "u-media-head",
     name: "Riley Media",
     email: "media@team.local",
-    password: "demo123",
+    passwordHash: DEFAULT_PASSWORD_HASH,
     role: "Section Head",
     section: "Media",
+    subsection: "All",
     score: START_SCORE,
   },
   {
     id: "u-alex",
     name: "Alex Vermeer",
     email: "alex@team.local",
-    password: "demo123",
+    passwordHash: DEFAULT_PASSWORD_HASH,
     role: "Member",
     section: "Engineering",
+    subsection: "Programming",
     score: START_SCORE,
   },
   {
     id: "u-nova",
     name: "Nova Jansen",
     email: "nova@team.local",
-    password: "demo123",
+    passwordHash: DEFAULT_PASSWORD_HASH,
     role: "Member",
     section: "Media",
+    subsection: "Photography",
     score: START_SCORE,
   },
   {
     id: "u-lee",
     name: "Lee Bakker",
     email: "lee@team.local",
-    password: "demo123",
+    passwordHash: DEFAULT_PASSWORD_HASH,
     role: "Member",
     section: "Marketing and Communications",
+    subsection: "Outreach",
     score: START_SCORE,
   },
 ];
@@ -107,6 +121,7 @@ const defaultDb = () => {
         title: "Engineering Drivebase Review",
         startsAt: tomorrow.toISOString(),
         scope: "Engineering",
+        subsection: "Programming",
         createdBy: "u-eng-head",
         attendance: {},
         applied: false,
@@ -118,6 +133,7 @@ const defaultDb = () => {
         title: "Full Team Scrimmage Prep",
         startsAt: weekend.toISOString(),
         scope: "Global",
+        subsection: "All",
         createdBy: "u-coach",
         attendance: {},
         applied: false,
@@ -159,12 +175,42 @@ function loadDb() {
     return fresh;
   }
   try {
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    return migrateDb(parsed);
   } catch {
     const fresh = defaultDb();
     localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
     return fresh;
   }
+}
+
+function migrateDb(source) {
+  const fresh = defaultDb();
+  const next = {
+    users: Array.isArray(source.users) ? source.users : fresh.users,
+    meetings: Array.isArray(source.meetings) ? source.meetings : fresh.meetings,
+    messages: Array.isArray(source.messages) ? source.messages : fresh.messages,
+  };
+  let changed = false;
+  next.users.forEach((user) => {
+    if (!user.passwordHash && user.password) {
+      user.passwordHash = DEFAULT_PASSWORD_HASH;
+      delete user.password;
+      changed = true;
+    }
+    if (!user.subsection) {
+      user.subsection = user.role === "Coach" || user.role === "Section Head" ? "All" : firstSubsection(user.section);
+      changed = true;
+    }
+  });
+  next.meetings.forEach((meeting) => {
+    if (!meeting.subsection) {
+      meeting.subsection = "All";
+      changed = true;
+    }
+  });
+  if (changed) localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  return next;
 }
 
 function saveDb() {
@@ -183,12 +229,25 @@ function setSession(user) {
 }
 
 function wireLogin() {
-  document.querySelector("#login-form").addEventListener("submit", (event) => {
+  document.querySelector("#open-login").addEventListener("click", () => {
+    document.querySelector("#public-site").classList.add("hidden");
+    document.querySelector("#login-screen").classList.remove("hidden");
+    refreshIcons();
+  });
+
+  document.querySelector("#back-public").addEventListener("click", () => {
+    document.querySelector("#login-screen").classList.add("hidden");
+    document.querySelector("#public-site").classList.remove("hidden");
+    document.querySelector("#login-error").textContent = "";
+  });
+
+  document.querySelector("#login-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const email = document.querySelector("#login-email").value.trim().toLowerCase();
     const password = document.querySelector("#login-password").value;
+    const passwordHash = await hashPassword(password);
     const user = db.users.find(
-      (candidate) => candidate.email.toLowerCase() === email && candidate.password === password,
+      (candidate) => candidate.email.toLowerCase() === email && candidate.passwordHash === passwordHash,
     );
     if (!user) {
       document.querySelector("#login-error").textContent = "Email or password is incorrect.";
@@ -197,13 +256,6 @@ function wireLogin() {
     setSession(user);
     document.querySelector("#login-error").textContent = "";
     showAuthState();
-  });
-
-  document.querySelectorAll("[data-login]").forEach((button) => {
-    button.addEventListener("click", () => {
-      document.querySelector("#login-email").value = button.dataset.login;
-      document.querySelector("#login-password").value = "demo123";
-    });
   });
 }
 
@@ -230,15 +282,26 @@ function wireChrome() {
 
 function showAuthState() {
   const isLoggedIn = Boolean(currentUser);
-  document.querySelector("#login-screen").classList.toggle("hidden", isLoggedIn);
+  document.querySelector("#public-site").classList.toggle("hidden", isLoggedIn);
+  document.querySelector("#login-screen").classList.add("hidden");
   document.querySelector("#app").classList.toggle("hidden", !isLoggedIn);
   if (isLoggedIn) {
     document.querySelector("#user-name").textContent = currentUser.name;
     document.querySelector("#role-label").textContent =
-      currentUser.role === "Coach" ? "Coach access" : `${currentUser.role} - ${currentUser.section}`;
+      currentUser.role === "Coach"
+        ? "Coach access"
+        : `${currentUser.role} - ${currentUser.section}${currentUser.subsection && currentUser.subsection !== "All" ? ` / ${currentUser.subsection}` : ""}`;
     render();
   }
   refreshIcons();
+}
+
+async function hashPassword(password) {
+  const data = new TextEncoder().encode(password);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 function refreshIcons() {
@@ -298,7 +361,11 @@ function canManageMeeting(meeting) {
 
 function meetingMembers(meeting) {
   if (meeting.scope === "Global") return db.users.filter((user) => user.role !== "Coach");
-  return db.users.filter((user) => user.section === meeting.scope);
+  return db.users.filter(
+    (user) =>
+      user.section === meeting.scope &&
+      (meeting.subsection === "All" || user.subsection === meeting.subsection),
+  );
 }
 
 function renderDashboard() {
@@ -370,7 +437,8 @@ function renderMembers() {
               <label>Email<input name="email" type="email" required></label>
               <label>Role<select name="role"><option>Member</option><option>Section Head</option><option>Coach</option></select></label>
               <label>Section<select name="section">${sections.map((s) => `<option>${s}</option>`).join("")}</select></label>
-              <label>Password<input name="password" value="demo123" required></label>
+              <label>Subsection<select name="subsection">${subsectionOptions("Engineering")}</select></label>
+              <label>Temporary password<input name="password" type="password" required></label>
               <label>Starting score<input name="score" type="number" step="0.025" value="${START_SCORE}" required></label>
               <button class="primary-btn full" type="submit"><i data-lucide="save"></i>Create user</button>
             </form>`,
@@ -389,7 +457,14 @@ function renderMembers() {
   };
 
   document.querySelector("#member-section-filter")?.addEventListener("change", renderTable);
-  document.querySelector("#member-form")?.addEventListener("submit", handleCreateUser);
+  const memberForm = document.querySelector("#member-form");
+  memberForm?.addEventListener("submit", handleCreateUser);
+  memberForm?.elements.section.addEventListener("change", () => {
+    memberForm.elements.subsection.innerHTML = subsectionOptions(memberForm.elements.section.value);
+  });
+  memberForm?.elements.role.addEventListener("change", () => {
+    memberForm.elements.subsection.disabled = memberForm.elements.role.value !== "Member";
+  });
   renderTable();
 }
 
@@ -402,7 +477,7 @@ function renderMembersTable(members, editable) {
         <tr>
           <td><strong>${escapeHtml(member.name)}</strong><br><span class="muted">${escapeHtml(member.email)}</span></td>
           <td>${member.role}</td>
-          <td><span class="badge">${member.section}</span></td>
+          <td><span class="badge">${member.section}</span><br><span class="muted">${member.subsection || "All"}</span></td>
           <td>${scorePill(member.score)}</td>
           <td>
             ${
@@ -428,7 +503,7 @@ function renderMembersTable(members, editable) {
   return `
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Name</th><th>Role</th><th>Section</th><th>Score</th><th>Correction</th><th>Latest Activity</th></tr></thead>
+        <thead><tr><th>Name</th><th>Role</th><th>Section / Subsection</th><th>Score</th><th>Correction</th><th>Latest Activity</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
@@ -479,19 +554,21 @@ function wireMemberTable() {
   });
 }
 
-function handleCreateUser(event) {
+async function handleCreateUser(event) {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
   const role = form.get("role");
   const section = role === "Coach" ? "All" : form.get("section");
+  const subsection = role === "Member" ? form.get("subsection") : "All";
   const score = clampScore(Number(form.get("score")));
   const user = {
     id: crypto.randomUUID(),
     name: form.get("name").trim(),
     email: form.get("email").trim(),
-    password: form.get("password"),
+    passwordHash: await hashPassword(form.get("password")),
     role,
     section,
+    subsection,
     score,
     portfolio: [],
     activityLog: [],
@@ -546,6 +623,9 @@ function renderMeetings() {
                     : `<option selected>${currentUser.section}</option>`
                 }
               </select></label>
+              <label>Subsection<select name="subsection">
+                ${currentUser.role === "Coach" ? `<option>All</option>` : subsectionOptions(currentUser.section, true)}
+              </select></label>
               <button class="primary-btn full" type="submit"><i data-lucide="calendar-plus"></i>Create meeting</button>
             </form>`,
           )
@@ -555,6 +635,13 @@ function renderMeetings() {
   `;
 
   document.querySelector("#meeting-form")?.addEventListener("submit", handleCreateMeeting);
+  const meetingForm = document.querySelector("#meeting-form");
+  meetingForm?.elements.scope.addEventListener("change", () => {
+    meetingForm.elements.subsection.innerHTML =
+      meetingForm.elements.scope.value === "Global"
+        ? `<option>All</option>`
+        : subsectionOptions(meetingForm.elements.scope.value, true);
+  });
   document.querySelectorAll(".attendance-select").forEach((select) => {
     select.addEventListener("change", () => {
       const meeting = db.meetings.find((item) => item.id === select.dataset.meeting);
@@ -575,11 +662,13 @@ function handleCreateMeeting(event) {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
   const scope = currentUser.role === "Section Head" ? currentUser.section : form.get("scope");
+  const subsection = scope === "Global" ? "All" : form.get("subsection");
   db.meetings.push({
     id: crypto.randomUUID(),
     title: form.get("title").trim(),
     startsAt: new Date(form.get("startsAt")).toISOString(),
     scope,
+    subsection,
     createdBy: currentUser.id,
     attendance: {},
     applied: false,
@@ -601,7 +690,7 @@ function renderMeetingCard(meeting) {
       const value = meeting.attendance[member.id] || "";
       return `
         <div class="attendance-row">
-          <div><strong>${escapeHtml(member.name)}</strong><br><span class="muted">${member.section} - ${scorePill(member.score)}</span></div>
+          <div><strong>${escapeHtml(member.name)}</strong><br><span class="muted">${escapeHtml(member.section)} / ${escapeHtml(member.subsection || "All")} - ${scorePill(member.score)}</span></div>
           <select class="attendance-select" data-meeting="${meeting.id}" data-member="${member.id}" ${meeting.applied || !canManageMeeting(meeting) ? "disabled" : ""}>
             <option value="" ${value === "" ? "selected" : ""}>Not marked</option>
             ${Object.entries(attendanceActions)
@@ -628,7 +717,7 @@ function renderMeetingCard(meeting) {
       <header>
         <div>
           <h3>${escapeHtml(meeting.title)}</h3>
-          <p class="muted">${formatDate(meeting.startsAt)} - <span class="badge">${meeting.scope}</span> ${meeting.applied ? "- Applied" : ""} ${meeting.reversed ? "- Reversed" : ""}</p>
+          <p class="muted">${formatDate(meeting.startsAt)} - <span class="badge">${meetingScopeLabel(meeting)}</span> ${meeting.applied ? "- Applied" : ""} ${meeting.reversed ? "- Reversed" : ""}</p>
         </div>
       </header>
       <div class="attendance-grid">${controls || `<div class="empty-state">No members for this meeting scope.</div>`}</div>
@@ -686,7 +775,10 @@ function getVisibleMeetings() {
     );
   }
   return db.meetings.filter(
-    (meeting) => meeting.scope === currentUser.section || meeting.scope === "Global",
+    (meeting) =>
+      meeting.scope === "Global" ||
+      (meeting.scope === currentUser.section &&
+        (meeting.subsection === "All" || meeting.subsection === currentUser.subsection)),
   );
 }
 
@@ -704,7 +796,7 @@ function renderAgenda() {
               <strong>${new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(meeting.startsAt))}</strong>
               <div>
                 <strong>${escapeHtml(meeting.title)}</strong>
-                <p class="muted">${formatDate(meeting.startsAt)} - ${meeting.scope}</p>
+                <p class="muted">${formatDate(meeting.startsAt)} - ${meetingScopeLabel(meeting)}</p>
               </div>
             </div>`,
         )
@@ -878,7 +970,7 @@ function renderMeetingList(meetings) {
   return `<ul class="list">${meetings
     .map(
       (meeting) =>
-        `<li class="list-item"><header><strong>${escapeHtml(meeting.title)}</strong><span class="badge">${meeting.scope}</span></header><span class="muted">${formatDate(meeting.startsAt)}</span></li>`,
+        `<li class="list-item"><header><strong>${escapeHtml(meeting.title)}</strong><span class="badge">${meetingScopeLabel(meeting)}</span></header><span class="muted">${formatDate(meeting.startsAt)}</span></li>`,
     )
     .join("")}</ul>`;
 }
@@ -926,6 +1018,23 @@ function renderMessageList(messages) {
       </div>`;
     })
     .join("");
+}
+
+function firstSubsection(sectionName) {
+  return sectionDefinitions.find((section) => section.name === sectionName)?.subsections[0] || "All";
+}
+
+function subsectionOptions(sectionName, includeAll = false) {
+  const options = sectionDefinitions.find((section) => section.name === sectionName)?.subsections || [];
+  return `${includeAll ? `<option>All</option>` : ""}${options
+    .map((subsection) => `<option>${escapeHtml(subsection)}</option>`)
+    .join("")}`;
+}
+
+function meetingScopeLabel(meeting) {
+  if (meeting.scope === "Global") return "Full team";
+  if (!meeting.subsection || meeting.subsection === "All") return escapeHtml(meeting.scope);
+  return `${escapeHtml(meeting.scope)} - ${escapeHtml(meeting.subsection)}`;
 }
 
 function formatDate(value) {
