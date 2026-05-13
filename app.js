@@ -7,6 +7,9 @@ const SUPABASE_SYNC_KEY = "robotics-attendance-supabase-sync";
 const SUPABASE_STATE_ID = "main";
 const SHIPPED_SUPABASE_CONFIG =
   typeof window !== "undefined" && window.JTECHMASTERS_SUPABASE ? window.JTECHMASTERS_SUPABASE : {};
+const DB_SAVE_RATE_LIMIT_MS = 500;
+const SUPABASE_REFRESH_INTERVAL_MS = 30000;
+let dbSaveTimer = null;
 const MAX_SCORE = 7;
 const START_SCORE = 2;
 const WARNING_THRESHOLD = 0;
@@ -38,6 +41,232 @@ const sectionDefinitions = [
 ];
 
 const sections = sectionDefinitions.map((section) => section.name);
+
+function normalizeAssignments(user) {
+  if (Array.isArray(user.assignments) && user.assignments.length) {
+    return user.assignments.map((assignment) => ({
+      section: String(assignment.section || "All"),
+      subsection: String(assignment.subsection || "All"),
+    }));
+  }
+
+  const section = String(user.section || "All");
+  const subsection = String(
+    user.subsection ||
+      (user.role === "Coach" || user.role === "Section Head"
+        ? "All"
+        : firstSubsection(section)),
+  );
+  return [{ section, subsection }];
+}
+
+function userAssignments(user) {
+  return normalizeAssignments(user);
+}
+
+function userHasSection(user, section) {
+  if (section === "All") return true;
+  return userAssignments(user).some(
+    (assignment) => assignment.section === "All" || assignment.section === section,
+  );
+}
+
+function userHasAnySection(user, sectionsToCheck) {
+  return userAssignments(user).some((assignment) =>
+    sectionsToCheck.some((section) => assignment.section === "All" || assignment.section === section),
+  );
+}
+
+function userHasAssignment(user, section, subsection) {
+  return userAssignments(user).some((assignment) => {
+    if (assignment.section !== "All" && assignment.section !== section) return false;
+    if (subsection === "All") return true;
+    return assignment.subsection === "All" || assignment.subsection === subsection;
+  });
+}
+
+function getPrimarySection(user) {
+  return userAssignments(user)[0]?.section || "All";
+}
+
+function getPrimarySubsection(user) {
+  return userAssignments(user)[0]?.subsection || "All";
+}
+
+function renderAssignmentLabels(user) {
+  return userAssignments(user)
+    .map((assignment) =>
+      assignment.subsection === "All"
+        ? `<span class="assignment-bubble">${escapeHtml(assignment.section)}</span>`
+        : `<span class="assignment-bubble">${escapeHtml(assignment.section)} / ${escapeHtml(assignment.subsection)}</span>`,
+    )
+    .join(" ");
+}
+
+function renderAssignmentOptions() {
+  return sectionDefinitions
+    .flatMap((section) => [
+      { section: section.name, subsection: "All" },
+      ...section.subsections.map((subsection) => ({ section: section.name, subsection })),
+    ])
+    .map(
+      (assignment) =>
+        `<option value="${escapeHtml(assignment.section)}|${escapeHtml(assignment.subsection)}">${escapeHtml(
+          assignment.subsection === "All"
+            ? `${assignment.section} / Whole section`
+            : `${assignment.section} / ${assignment.subsection}`,
+        )}</option>`,
+    )
+    .join("");
+}
+
+function initAssignmentsInput() {
+  const input = document.querySelector("#assignments-text");
+  const suggestions = document.querySelector(".suggestions");
+  const selectedContainer = document.querySelector("#selected-assignments");
+  const currentSectionLabel = document.querySelector("#current-section-label");
+  const hiddenInput = document.querySelector("#assignments-hidden");
+  let selectedAssignments = [];
+  let currentSection = null;
+  let currentMode = "section"; // "section" or "subsection"
+
+  function updateHiddenInput() {
+    hiddenInput.value = selectedAssignments
+      .map((assignment) => `${assignment.section || "All"} / ${assignment.subsection || "All"}`)
+      .join(", ");
+  }
+
+  function updateCurrentSectionLabel() {
+    if (currentMode === "subsection" && currentSection) {
+      currentSectionLabel.textContent = `${currentSection} >`;
+      currentSectionLabel.classList.add("active-section-label");
+    } else {
+      currentSectionLabel.textContent = "";
+      currentSectionLabel.classList.remove("active-section-label");
+    }
+  }
+
+  function renderSelected() {
+    selectedContainer.innerHTML = selectedAssignments
+      .map((assignment, index) => {
+        const sectionText = String(assignment.section || "All").trim() || "All";
+        const subsectionText = String(assignment.subsection || "All").trim() || "All";
+        const displayText = subsectionText === "All" ? sectionText : `${sectionText} / ${subsectionText}`;
+        return `
+          <span class="assignment-bubble selected-assignment">
+            ${escapeHtml(displayText)}
+            <button type="button" class="remove-assignment" data-index="${index}">×</button>
+          </span>
+        `;
+      })
+      .join("");
+
+    selectedContainer.querySelectorAll(".remove-assignment").forEach((button) => {
+      button.addEventListener("click", () => {
+        const index = Number(button.dataset.index);
+        selectedAssignments.splice(index, 1);
+        renderSelected();
+      });
+    });
+
+    updateHiddenInput();
+  }
+
+  function showSuggestions(items) {
+    if (!items.length) {
+      suggestions.style.display = "none";
+      return;
+    }
+
+    suggestions.innerHTML = items
+      .map((item, index) => `<div class="suggestion-item" data-index="${index}">${escapeHtml(item.label)}</div>`)
+      .join("");
+
+    suggestions.style.display = "block";
+
+    suggestions.querySelectorAll(".suggestion-item").forEach((item) => {
+      item.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        const index = Number(item.dataset.index);
+        const selection = items[index];
+        if (selection) {
+          selectSuggestion(selection);
+        }
+      });
+    });
+  }
+
+  function selectSuggestion(selection) {
+    if (!selection) return;
+
+    if (currentMode === "section") {
+      currentSection = String(selection.section || "").trim();
+      currentMode = "subsection";
+      input.value = "";
+      input.placeholder = `Subsections for ${currentSection}...`;
+      updateCurrentSectionLabel();
+      updateSuggestions();
+      return;
+    }
+
+    const sectionName = String(currentSection || selection.section || "All").trim() || "All";
+    const subsectionName = String(selection.subsection || "All").trim() || "All";
+    selectedAssignments.push({ section: sectionName, subsection: subsectionName });
+    currentSection = null;
+    currentMode = "section";
+    input.value = "";
+    input.placeholder = "Start typing a section...";
+    renderSelected();
+    updateCurrentSectionLabel();
+    suggestions.style.display = "none";
+  }
+
+  function updateSuggestions() {
+    const query = input.value.toLowerCase();
+    let items = [];
+
+    if (currentMode === "section") {
+      items = sectionDefinitions
+        .filter((section) => section.name.toLowerCase().startsWith(query))
+        .map((section) => ({ section: section.name, label: section.name }));
+    } else if (currentSection) {
+      const sectionDef = sectionDefinitions.find(
+        (section) => section.name.toLowerCase() === String(currentSection).trim().toLowerCase(),
+      );
+      if (sectionDef) {
+        items = ["All", ...sectionDef.subsections]
+          .filter((sub) => sub.toLowerCase().startsWith(query))
+          .map((sub) => ({ section: sectionDef.name, subsection: sub, label: sub }));
+      }
+    }
+
+    showSuggestions(items);
+  }
+
+  input.addEventListener("input", updateSuggestions);
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Backspace" && !input.value && currentMode === "subsection") {
+      event.preventDefault();
+      currentMode = "section";
+      currentSection = null;
+      input.value = "";
+      input.placeholder = "Start typing a section...";
+      updateCurrentSectionLabel();
+      updateSuggestions();
+    }
+  });
+
+  input.addEventListener("blur", () => {
+    setTimeout(() => {
+      suggestions.style.display = "none";
+    }, 150);
+  });
+
+  input.addEventListener("focus", updateSuggestions);
+  updateCurrentSectionLabel();
+  renderSelected();
+}
 
 const seedUsers = [
   {
@@ -241,7 +470,8 @@ let currentView = "dashboard";
 let gitAutosaveTimer = null;
 let gitAutosaveBusy = false;
 let supabaseAutosaveTimer = null;
-let supabaseAutosaveBusy = false;
+let supabaseRemoteBusy = false;
+let supabaseRefreshTimer = null;
 let supabaseInitialLoadDone = false;
 
 const viewRoot = document.querySelector("#view-root");
@@ -318,8 +548,35 @@ function migrateDb(source) {
       delete user.password;
       changed = true;
     }
+    if (!Array.isArray(user.assignments) || !user.assignments.length) {
+      user.assignments = [
+        {
+          section: String(user.section || "All"),
+          subsection: String(
+            user.subsection ||
+              (user.role === "Coach" || user.role === "Section Head"
+                ? "All"
+                : firstSubsection(String(user.section || sections[0]))),
+          ),
+        },
+      ];
+      changed = true;
+    }
+    user.assignments = user.assignments.map((assignment) => ({
+      section: String(assignment.section || user.section || "All"),
+      subsection: String(
+        assignment.subsection ||
+          (assignment.section === "All"
+            ? "All"
+            : firstSubsection(String(assignment.section || user.section || sections[0]))),
+      ),
+    }));
+    if (!user.section) {
+      user.section = user.assignments[0]?.section || "All";
+      changed = true;
+    }
     if (!user.subsection) {
-      user.subsection = user.role === "Coach" || user.role === "Section Head" ? "All" : firstSubsection(user.section);
+      user.subsection = user.assignments[0]?.subsection || "All";
       changed = true;
     }
     if (typeof user.failedLoginAttempts !== "number") {
@@ -351,8 +608,16 @@ function migrateDb(source) {
 
 function saveDb() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
-  scheduleSupabaseAutosave();
-  scheduleGitAutosave();
+
+  if (dbSaveTimer) {
+    clearTimeout(dbSaveTimer);
+  }
+
+  dbSaveTimer = setTimeout(() => {
+    scheduleSupabaseAutosave();
+    scheduleGitAutosave();
+    dbSaveTimer = null;
+  }, DB_SAVE_RATE_LIMIT_MS);
 }
 
 function getSessionUser() {
@@ -387,7 +652,7 @@ function wireLogin() {
 
     // Check if account is blocked by coach
     if (candidate?.blockedByCoach) {
-      document.querySelector("#login-error").textContent = "This account is blocked. Please contact a coach to reset your password.";
+      document.querySelector("#login-error").textContent = `This account is blocked. Please contact a coach to reset your password. ${candidate.role === "Coach" ? " \n \n Since you are trying to login as a coach, you are not able to access your account. Please contact another coach (or a person who has access to the database) to reset your password." : ""}`;
       return;
     }
 
@@ -396,11 +661,16 @@ function wireLogin() {
       const now = new Date().getTime();
       if (now < candidate.lockedUntil) {
         const remainingMinutes = Math.ceil((candidate.lockedUntil - now) / 60000);
-        document.querySelector("#login-error").textContent = `Too many failed attempts. Please try again in ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''}.`;
+        if (candidate.role === "Coach") {
+          document.querySelector("#login-error").textContent = `Too many failed attempts. Try again in ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''}. \n \n Since you are trying to login as a coach, the blocked time was halved.`;
+        } else {
+          document.querySelector("#login-error").textContent = `Too many failed attempts. Try again in ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''} or contact a coach to unlock your account.`; 
+        }
         return;
       } else {
-        // Cooldown expired.
+        // Cooldown expired. Dont reset counter so account can get blocked.
         candidate.lockedUntil = null;
+        candidate.lastFailedAttempt = null;
         saveDb();
       }
     }
@@ -417,7 +687,7 @@ function wireLogin() {
         if (candidate.failedLoginAttempts >= PASSWORD_ATTEMPT_LIMITS.BLOCK_ATTEMPTS) {
           candidate.blockedByCoach = true;
           if (candidate.role === "Coach") {
-            document.querySelector("#login-error").textContent = `Account locked after ${PASSWORD_ATTEMPT_LIMITS.BLOCK_ATTEMPTS} failed attempts. \n \n Since you are trying to login as a coach, the account is blocked to prevent unauthorized access. Please contact another coach (or a person who has access to the database) to reset your password.`;
+            document.querySelector("#login-error").textContent = `Account locked after ${PASSWORD_ATTEMPT_LIMITS.BLOCK_ATTEMPTS} failed attempts. \n \n Since you are trying to login as a coach, you are not able to access your account. Please contact another coach (or a person who has access to the database) to reset your password.`;
           } else {
             document.querySelector("#login-error").textContent = `Account blocked after ${PASSWORD_ATTEMPT_LIMITS.BLOCK_ATTEMPTS} failed attempts. Contact a coach to reset your password.`; 
           }
@@ -426,11 +696,12 @@ function wireLogin() {
         }
 
         if (candidate.failedLoginAttempts >= PASSWORD_ATTEMPT_LIMITS.COOLDOWN_ATTEMPTS) {
+          let cooldownTime;
           if (candidate.role === "Coach") {
-            const cooldownTime = PASSWORD_ATTEMPT_LIMITS.COOLDOWN_MINUTES * 30000;
+            cooldownTime = (PASSWORD_ATTEMPT_LIMITS.COOLDOWN_MINUTES * 60000) / 2;
             document.querySelector("#login-error").textContent = `Too many failed attempts. Try again in ${PASSWORD_ATTEMPT_LIMITS.COOLDOWN_MINUTES / 2} minutes. \n \n Since you are trying to login as a coach, the blocked time was halved.`;
           } else {
-            const cooldownTime = PASSWORD_ATTEMPT_LIMITS.COOLDOWN_MINUTES * 60000;
+            cooldownTime = PASSWORD_ATTEMPT_LIMITS.COOLDOWN_MINUTES * 60000;
             document.querySelector("#login-error").textContent = `Too many failed attempts. Try again in ${PASSWORD_ATTEMPT_LIMITS.COOLDOWN_MINUTES} minutes or contact a coach to unlock your account.`; 
           }
           candidate.lockedUntil = new Date().getTime() + cooldownTime;
@@ -723,7 +994,10 @@ function render() {
 function visibleMembers() {
   if (currentUser.role === "Coach") return db.users;
   if (currentUser.role === "Section Head") {
-    return db.users.filter((user) => user.section === currentUser.section);
+    const mySections = userAssignments(currentUser).map((assignment) => assignment.section);
+    return db.users.filter(
+      (user) => user.role !== "Coach" && userHasAnySection(user, mySections),
+    );
   }
   return db.users.filter((user) => user.id === currentUser.id);
 }
@@ -736,13 +1010,9 @@ function messageMatchesAudience(message, user) {
   if (Array.isArray(message.recipientIds)) return message.recipientIds.includes(user.id);
   const audience = message.audience || { type: "user", userId: message.toId };
   if (audience.type === "team") return true;
-  if (audience.type === "section") return user.section === audience.section || message.fromId === user.id;
+  if (audience.type === "section") return userHasSection(user, audience.section) || message.fromId === user.id;
   if (audience.type === "subsection") {
-    return (
-      (user.section === audience.section &&
-        (user.subsection === audience.subsection || user.role === "Section Head")) ||
-      message.fromId === user.id
-    );
+    return userHasAssignment(user, audience.section, audience.subsection) || message.fromId === user.id;
   }
   return audience.userId === user.id;
 }
@@ -750,12 +1020,10 @@ function messageMatchesAudience(message, user) {
 function messageRecipientsForAudience(audience) {
   if (audience.type === "team") return db.users;
   if (audience.type === "section") {
-    return db.users.filter((user) => user.section === audience.section);
+    return db.users.filter((user) => userHasSection(user, audience.section));
   }
   if (audience.type === "subsection") {
-    return db.users.filter(
-      (user) => user.section === audience.section && user.subsection === audience.subsection,
-    );
+    return db.users.filter((user) => userHasAssignment(user, audience.section, audience.subsection));
   }
   return db.users.filter((user) => user.id === audience.userId);
 }
@@ -803,7 +1071,7 @@ function subsectionSelectOptions(section) {
 
 function privateUserOptions(section) {
   return directMessageUsers()
-    .filter((user) => user.section === section)
+    .filter((user) => userHasSection(user, section))
     .map((user) => ({ value: user.id, label: `${user.name} - ${user.role}` }));
 }
 
@@ -818,7 +1086,7 @@ function parseMessageAudience(kind, sectionValue, subsectionValue, privateUserId
   }
   if (
     kind === "private" &&
-    directMessageUsers().some((user) => user.id === privateUserId && user.section === section)
+    directMessageUsers().some((user) => user.id === privateUserId && userHasSection(user, section))
   ) {
     return { type: "user", userId: privateUserId };
   }
@@ -837,28 +1105,27 @@ function canSendToSubsection(section, subsection) {
 function editableMembers() {
   if (currentUser.role === "Coach") return db.users;
   if (currentUser.role === "Section Head") {
-    return db.users.filter((user) => user.section === currentUser.section);
+    const mySections = userAssignments(currentUser).map((assignment) => assignment.section);
+    return db.users.filter((user) => user.role !== "Coach" && userHasAnySection(user, mySections));
   }
   return [];
 }
 
 function canManageMember(member) {
   if (currentUser.role === "Coach") return true;
-  return currentUser.role === "Section Head" && member.section === currentUser.section;
+  if (currentUser.role !== "Section Head") return false;
+  const mySections = userAssignments(currentUser).map((assignment) => assignment.section);
+  return member.role !== "Coach" && userHasAnySection(member, mySections);
 }
 
 function canManageMeeting(meeting) {
   if (currentUser.role === "Coach") return true;
-  return currentUser.role === "Section Head" && meeting.scope === currentUser.section;
+  return currentUser.role === "Section Head" && userHasSection(currentUser, meeting.scope);
 }
 
 function meetingMembers(meeting) {
   if (meeting.scope === "Global") return db.users.filter((user) => user.role !== "Coach");
-  return db.users.filter(
-    (user) =>
-      user.section === meeting.scope &&
-      (meeting.subsection === "All" || user.subsection === meeting.subsection),
-  );
+  return db.users.filter((user) => userHasAssignment(user, meeting.scope, meeting.subsection));
 }
 
 function renderDashboard() {
@@ -957,8 +1224,15 @@ function renderMembers() {
               <label>Name<input name="name" required></label>
               <label>Email<input name="email" type="email" required></label>
               <label>Role<select name="role"><option>Member</option><option>Section Head</option><option>Coach</option></select></label>
-              <label>Section<select name="section">${sections.map((s) => `<option>${s}</option>`).join("")}</select></label>
-              <label>Subsection<select name="subsection">${subsectionOptions("Engineering")}</select></label>
+              <label>Assignments<div id="assignments-input" class="assignments-input">
+                <div id="selected-assignments" class="selected-assignments"></div>
+                <div class="input-row">
+                  <span id="current-section-label" class="current-section-label"></span>
+                  <input type="text" id="assignments-text" placeholder="Start typing a section...">
+                </div>
+                <div class="suggestions" style="display: none;"></div>
+              </div></label>
+              <input type="hidden" name="assignments" id="assignments-hidden">
               <label>Temporary password<input name="password" type="password" required></label>
               <label>Starting score<input name="score" type="number" step="0.025" value="${START_SCORE}" required></label>
               <button class="primary-btn full" type="submit"><i data-lucide="save"></i>Create user</button>
@@ -971,7 +1245,9 @@ function renderMembers() {
   const renderTable = () => {
     const selected = document.querySelector("#member-section-filter")?.value || "All";
     const filtered =
-      selected === "All" ? members : members.filter((member) => member.section === selected);
+      selected === "All"
+        ? members
+        : members.filter((member) => userHasSection(member, selected));
     document.querySelector("#member-table").innerHTML = renderMembersTable(filtered, editable);
     wireMemberTable();
     refreshIcons();
@@ -983,12 +1259,7 @@ function renderMembers() {
   });
   const memberForm = document.querySelector("#member-form");
   memberForm?.addEventListener("submit", handleCreateUser);
-  memberForm?.elements.section.addEventListener("change", () => {
-    memberForm.elements.subsection.innerHTML = subsectionOptions(memberForm.elements.section.value);
-  });
-  memberForm?.elements.role.addEventListener("change", () => {
-    memberForm.elements.subsection.disabled = memberForm.elements.role.value !== "Member";
-  });
+  initAssignmentsInput();
   renderTable();
 }
 
@@ -1005,7 +1276,7 @@ function renderMembersTable(members, editable) {
         <tr class="${statusClass}">
           <td><strong>${escapeHtml(member.name)}</strong><br><span class="muted">${escapeHtml(member.email)}</span>${statusIcon ? ` <span class="status-icon">${statusIcon}</span>` : ""}</td>
           <td>${member.role}</td>
-          <td><span class="badge">${member.section}</span><br><span class="muted">${member.subsection || "All"}</span></td>
+          <td class="assignments-cell">${renderAssignmentLabels(member)}</td>
           <td>${scorePill(member.score)}</td>
           <td>
             ${
@@ -1029,7 +1300,7 @@ function renderMembersTable(members, editable) {
                 : `<span class="muted">View only</span>`
             }
           </td>
-          <td>${renderActivityList(member.activityLog.slice(-3), true)}</td>
+          <td class="activity-cell" data-member="${member.id}">${renderActivityList(member.activityLog.slice(-1), true)}</td>
         </tr>
       `;
     })
@@ -1037,7 +1308,7 @@ function renderMembersTable(members, editable) {
   return `
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Name</th><th>Role</th><th>Section / Subsection</th><th>Score</th><th>Correction</th><th>Latest Activity</th></tr></thead>
+        <thead><tr><th>Name</th><th>Role</th><th>Assignments</th><th>Score</th><th>Correction</th><th>Latest Activity</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
@@ -1082,19 +1353,19 @@ function wireMemberTable() {
     });
   });
 
-  document.querySelectorAll(".remove-member").forEach((button) => {
-    button.addEventListener("click", async () => {
-      if (currentUser.role !== "Coach") return;
-      const member = db.users.find((user) => user.id === button.dataset.member);
-      if (!member || member.id === currentUser.id) return;
-      const confirmed = await showConfirm(
-        `Remove ${member.name}? Their meetings, messages, logs, and portfolio entries will be deleted from this local app.`,
-        "Remove Member"
-      );
-      if (!confirmed) return;
-      removeMember(member.id);
-      saveDb();
-      renderMembers();
+  document.querySelectorAll(".activity-cell").forEach((cell) => {
+    cell.addEventListener("click", () => {
+      const memberId = cell.dataset.member;
+      const member = db.users.find((user) => user.id === memberId);
+      if (!member) return;
+      const isExpanded = cell.classList.contains("expanded");
+      if (isExpanded) {
+        cell.innerHTML = renderActivityList(member.activityLog.slice(-1), true);
+        cell.classList.remove("expanded");
+      } else {
+        cell.innerHTML = renderActivityList(member.activityLog, true);
+        cell.classList.add("expanded");
+      }
     });
   });
 
@@ -1104,6 +1375,22 @@ function wireMemberTable() {
       const member = db.users.find((user) => user.id === button.dataset.member);
       if (!member || hasOutsideCreditToday(member)) return;
       addOutsideMeetingCredit(member);
+      saveDb();
+      renderMembers();
+    });
+  });
+
+  document.querySelectorAll(".remove-member").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (currentUser.role !== "Coach") return;
+      const member = db.users.find((user) => user.id === button.dataset.member);
+      if (!member || member.id === currentUser.id) return;
+      const confirmed = await showConfirm(
+        `Are you sure you want to remove ${member.name}? This will also remove their messages and meeting attendance records.`,
+        "Remove User",
+      );
+      if (!confirmed) return;
+      removeMember(member.id);
       saveDb();
       renderMembers();
     });
@@ -1123,8 +1410,25 @@ async function handleCreateUser(event) {
     return;
   }
   const role = form.get("role");
-  const section = role === "Coach" ? "All" : form.get("section");
-  const subsection = role === "Member" ? form.get("subsection") : "All";
+  const rawAssignmentsText = form.get("assignments") || "";
+  const assignments = rawAssignmentsText
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s)
+    .map((assignmentStr) => {
+      const parts = assignmentStr.split(" / ").map((p) => p.trim());
+      if (parts.length === 2) {
+        return { section: parts[0], subsection: parts[1] };
+      }
+      return null;
+    })
+    .filter(Boolean);
+  const normalizedAssignments =
+    role === "Coach"
+      ? [{ section: "All", subsection: "All" }]
+      : assignments.length
+      ? assignments
+      : [{ section: "Engineering", subsection: "All" }];
   const score = clampScore(Number(form.get("score")));
   const user = {
     id: crypto.randomUUID(),
@@ -1132,8 +1436,11 @@ async function handleCreateUser(event) {
     email,
     passwordHash: await hashPassword(form.get("password")),
     role,
-    section,
-    subsection,
+    section: normalizedAssignments[0].section,
+    subsection: normalizedAssignments[0].subsection,
+    sections: normalizedAssignments.map((assignment) => assignment.section),
+    subsections: normalizedAssignments.map((assignment) => assignment.subsection),
+    assignments: normalizedAssignments,
     score,
     portfolio: [],
     activityLog: [],
@@ -1227,8 +1534,13 @@ function renderMeetings() {
   });
 }
 
-function handleCreateMeeting(event) {
+async function handleCreateMeeting(event) {
   event.preventDefault();
+  const confirmed = await showConfirm(
+    "Create this meeting? Members will be able to mark their attendance.",
+    "Create Meeting"
+  );
+  if (!confirmed) return;
   const form = new FormData(event.currentTarget);
   const scope = currentUser.role === "Section Head" ? currentUser.section : form.get("scope");
   const subsection = scope === "Global" ? "All" : form.get("subsection");
@@ -1251,26 +1563,46 @@ function handleCreateMeeting(event) {
 function renderMeetingCard(meeting) {
   const members = meetingMembers(meeting).filter((member) => {
     if (currentUser.role === "Member") return member.id === currentUser.id;
-    if (currentUser.role === "Section Head") return member.section === currentUser.section;
+    if (currentUser.role === "Section Head") {
+      const mySections = userAssignments(currentUser).map((assignment) => assignment.section);
+      return userHasAnySection(member, mySections);
+    }
     return true;
   });
   const controls = members
     .map((member) => {
       const value = meeting.attendance[member.id] || "";
       return `
-        <div class="attendance-row">
-          <div><strong>${escapeHtml(member.name)}</strong><br><span class="muted">${escapeHtml(member.section)} / ${escapeHtml(member.subsection || "All")} - ${scorePill(member.score)}</span></div>
-          <select class="attendance-select" data-meeting="${meeting.id}" data-member="${member.id}" ${meeting.applied || !canManageMeeting(meeting) ? "disabled" : ""}>
-            <option value="" ${value === "" ? "selected" : ""}>Not marked</option>
-            ${Object.entries(attendanceActions)
-              .filter(([, action]) => currentUser.role === "Coach" || !action.coachOnly)
-              .map(
-                ([key, action]) =>
-                  `<option value="${key}" ${value === key ? "selected" : ""}>${action.label} (${formatDelta(action.delta)})</option>`,
-              )
-              .join("")}
-          </select>
-        </div>F
+            <div class="attendance-row">
+              <div>
+                <strong>${escapeHtml(member.name)}</strong><br>
+                <div class="assignments-cell">
+                  ${renderAssignmentLabels(member)} 
+                </div>
+                ${scorePill(member.score)}
+              </div>
+
+              <select 
+                class="attendance-select" 
+                data-meeting="${meeting.id}" 
+                data-member="${member.id}" 
+                ${meeting.applied || !canManageMeeting(meeting) ? "disabled" : ""}
+              >
+                <option value="" ${value === "" ? "selected" : ""}>
+                  Not marked
+                </option>
+
+                ${Object.entries(attendanceActions)
+                  .filter(([, action]) => currentUser.role === "Coach" || !action.coachOnly)
+                  .map(
+                    ([key, action]) =>
+                      `<option value="${key}" ${value === key ? "selected" : ""}>
+                        ${action.label} (${formatDelta(action.delta)})
+                      </option>`
+                  )
+                  .join("")}
+              </select>
+            </div>
       `;
     })
     .join("");
@@ -1340,14 +1672,13 @@ function getVisibleMeetings() {
   if (currentUser.role === "Coach") return db.meetings;
   if (currentUser.role === "Section Head") {
     return db.meetings.filter(
-      (meeting) => meeting.scope === currentUser.section || meeting.scope === "Global",
+      (meeting) => meeting.scope === "Global" || userHasSection(currentUser, meeting.scope),
     );
   }
   return db.meetings.filter(
     (meeting) =>
       meeting.scope === "Global" ||
-      (meeting.scope === currentUser.section &&
-        (meeting.subsection === "All" || meeting.subsection === currentUser.subsection)),
+      userHasAssignment(currentUser, meeting.scope, meeting.subsection),
   );
 }
 
@@ -1446,6 +1777,13 @@ function renderMessages() {
     if (!recipients.length) {
       await showAlert("No recipients match that audience.", "No Recipients");
       return;
+    }
+    if (audience.type === "team") {
+      const confirmed = await showConfirm(
+        `Send this message to the entire team (${recipients.length} recipients)?`,
+        "Send to Whole Team"
+      );
+      if (!confirmed) return;
     }
     db.messages.push({
       id: crypto.randomUUID(),
@@ -1551,6 +1889,13 @@ function renderSiteManager() {
     ${currentUser.role === "Coach" ? renderSupabaseSyncPanel() : ""}
     ${currentUser.role === "Coach" ? renderGitSyncPanel() : ""}
     ${panel("Published Posts", renderPostManagerList())}
+    ${currentUser.role === "Coach" ? panel(
+      "Data Management",
+      `<form id="data-management-form" class="form-grid">
+        <label>Remove activity logs older than<select name="months">${[1,3,6,12,24].map((m) => `<option value="${m}">${m} months</option>`).join("")}</select></label>
+        <button class="danger-btn full" type="submit"><i data-lucide="trash-2"></i>Remove old logs</button>
+      </form>`,
+    ) : ""}
   `;
 
   document.querySelector("#about-form").addEventListener("submit", handleSaveAbout);
@@ -1571,6 +1916,24 @@ function renderSiteManager() {
       renderPublicSite();
       renderSiteManager();
     });
+  });
+
+  document.querySelector("#data-management-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const months = Number(form.get("months"));
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - months);
+    const cutoffIso = cutoff.toISOString();
+    let removedCount = 0;
+    db.users.forEach((user) => {
+      const originalLength = user.activityLog.length;
+      user.activityLog = user.activityLog.filter((entry) => entry.at >= cutoffIso);
+      removedCount += originalLength - user.activityLog.length;
+    });
+    saveDb();
+    await showAlert(`Removed ${removedCount} old activity log entries.`, "Data Cleanup Complete");
+    renderSiteManager();
   });
 }
 
@@ -2103,13 +2466,26 @@ function scheduleSupabaseAutosave() {
   supabaseAutosaveTimer = setTimeout(() => saveDbToSupabase(false), 1000);
 }
 
+function scheduleSupabaseRefresh() {
+  const config = getSupabaseSyncConfig();
+  if (!config.enabled || !config.url || !config.anonKey) return;
+  clearTimeout(supabaseRefreshTimer);
+  supabaseRefreshTimer = setTimeout(() => loadDbFromSupabase(false), SUPABASE_REFRESH_INTERVAL_MS);
+}
+
 async function loadDbFromSupabase(manual = false) {
   const config = getSupabaseSyncConfig();
   if (!config.enabled && !manual) return;
   if (!isSupabaseConfigured(config)) {
     updateSupabaseStatus("Supabase is missing a project URL or anon key.");
+    scheduleSupabaseRefresh();
     return;
   }
+  if (supabaseRemoteBusy) {
+    scheduleSupabaseRefresh();
+    return;
+  }
+  supabaseRemoteBusy = true;
   updateSupabaseStatus("Loading data from Supabase...");
   try {
     const response = await fetch(supabaseRowUrl(config), {
@@ -2127,16 +2503,24 @@ async function loadDbFromSupabase(manual = false) {
       supabaseInitialLoadDone = true;
       return;
     }
-    db = migrateDb(rows[0].data);
+    const newDb = migrateDb(rows[0].data);
+    const dbChanged = JSON.stringify(db) !== JSON.stringify(newDb);
+    db = newDb;
     saveDbLocalOnly();
     currentUser = getSessionUser();
-    renderPublicSite();
-    if (currentUser && viewRoot && viewTitle) render();
+    // Only re-render if data actually changed or this is a manual load
+    if (manual || dbChanged) {
+      renderPublicSite();
+      if (currentUser && viewRoot && viewTitle) render();
+    }
     supabaseInitialLoadDone = true;
     updateSupabaseStatus(`Loaded from Supabase ${formatDate(new Date().toISOString())}.`);
   } catch (error) {
     supabaseInitialLoadDone = true;
     updateSupabaseStatus(error.message || "Supabase load failed.");
+  } finally {
+    supabaseRemoteBusy = false;
+    scheduleSupabaseRefresh();
   }
 }
 
@@ -2147,11 +2531,11 @@ async function saveDbToSupabase(manual = false) {
     updateSupabaseStatus("Supabase is missing a project URL or anon key.");
     return;
   }
-  if (supabaseAutosaveBusy) {
+  if (supabaseRemoteBusy) {
     scheduleSupabaseAutosave();
     return;
   }
-  supabaseAutosaveBusy = true;
+  supabaseRemoteBusy = true;
   updateSupabaseStatus("Saving data to Supabase...");
   try {
     const response = await fetch(supabaseTableUrl(config), {
@@ -2172,7 +2556,8 @@ async function saveDbToSupabase(manual = false) {
   } catch (error) {
     updateSupabaseStatus(error.message || "Supabase save failed.");
   } finally {
-    supabaseAutosaveBusy = false;
+    supabaseRemoteBusy = false;
+    scheduleSupabaseRefresh();
   }
 }
 
