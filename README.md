@@ -28,11 +28,11 @@ Demo password for every seeded account is `demo123`.
 
 ## Storage
 
-The app stores data in LocalStorage under `robotics-attendance-hub-v1` and the current session in SessionStorage. It is ready for GitHub Pages because there is no build step and no paid backend dependency.
+The app can use Supabase as the shared backend for account info, meetings, messages, public posts, blogs, About content, socials, attendance scores, and portfolio entries. It keeps a LocalStorage copy under `robotics-attendance-hub-v1` as the browser cache/fallback, and the current signed-in member is kept in SessionStorage.
 
 ## Supabase Backend
 
-Run this SQL in the Supabase SQL editor, then configure the project URL and anon key in the coach-only Public Site tab:
+Run this SQL in the Supabase SQL editor:
 
 ```sql
 create table if not exists public.app_state (
@@ -57,13 +57,25 @@ using (id = 'main')
 with check (id = 'main');
 ```
 
-This uses the public anon key from the browser, so it is convenient but not strong security. For stronger production security, use Supabase Auth and role-based policies instead of public write access.
+Then edit `supabase-config.js` once before deploying:
+
+```js
+window.JTECHMASTERS_SUPABASE = {
+  enabled: true,
+  url: "https://your-project.supabase.co",
+  anonKey: "your-public-anon-key",
+  table: "app_state",
+  stateId: "main",
+};
+```
+
+That file is shipped with the site, so every device uses the same Supabase project without entering the public anon key again. Supabase anon keys are meant to be public in browser apps; the important protection is Row Level Security. The simple policies above allow public read/write to the shared app row for this static app. For stronger production security, use Supabase Auth and role-based policies.
 
 Coaches can optionally configure Git autosave from the member-only Public Site tab. This writes the browser database to `data/db.json` through the GitHub Contents API using a fine-grained GitHub token with repository Contents read/write permission. The token is stored only in that browser's LocalStorage and is not committed to the repo.
 
 ## GitHub Hosting
 
-GitHub Pages can host this app as a static site, but it cannot run a live backend process or database. GitHub Actions can run scheduled or build jobs, not a public always-on server. Public posts, social links, and the About Us content are therefore stored in the browser for this static version.
+GitHub Pages can host this app as a static site, but it cannot run a live backend process or database. Supabase provides the live database while the static pages remain deployable to GitHub Pages.
 
 ## Permissions
 

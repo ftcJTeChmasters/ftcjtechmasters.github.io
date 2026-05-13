@@ -5,6 +5,8 @@ const SESSION_KEY = "robotics-attendance-session";
 const GIT_SYNC_KEY = "robotics-attendance-git-sync";
 const SUPABASE_SYNC_KEY = "robotics-attendance-supabase-sync";
 const SUPABASE_STATE_ID = "main";
+const SHIPPED_SUPABASE_CONFIG =
+  typeof window !== "undefined" && window.JTECHMASTERS_SUPABASE ? window.JTECHMASTERS_SUPABASE : {};
 const MAX_SCORE = 7;
 const START_SCORE = 2;
 const WARNING_THRESHOLD = 0;
@@ -15,7 +17,7 @@ const attendanceActions = {
   absent: { label: "No show", delta: -1 },
 };
 
-const OUTSIDE_MEETING_DELTA = 0.025;
+const OUTSIDE_MEETING_DELTA = 0.05;
 
 const DEFAULT_PASSWORD_HASH = "d3ad9315b7be5dd53b31a273b3b3aba5defe700808305aa16a3062b76658a791";
 const publicPostTypes = ["Update", "Blog", "Link", "Photo", "Social"];
@@ -215,12 +217,12 @@ let supabaseInitialLoadDone = false;
 const viewRoot = document.querySelector("#view-root");
 const viewTitle = document.querySelector("#view-title");
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
   wireLogin();
   wireChrome();
+  await loadDbFromSupabase();
   renderPublicSite();
   showAuthState();
-  loadDbFromSupabase();
 });
 
 function loadDb() {
@@ -1257,15 +1259,16 @@ function renderGitSyncPanel() {
 
 function renderSupabaseSyncPanel() {
   const config = getSupabaseSyncConfig();
+  const hasShippedConfig = Boolean(SHIPPED_SUPABASE_CONFIG.url && SHIPPED_SUPABASE_CONFIG.anonKey);
   return panel(
     "Supabase Backend",
     `<form id="supabase-sync-form" class="form-grid">
       <label class="checkbox-label full"><input name="enabled" type="checkbox" ${config.enabled ? "checked" : ""}> Use Supabase as shared backend</label>
       <label class="full">Project URL<input name="url" value="${escapeHtml(config.url)}" placeholder="https://your-project.supabase.co"></label>
-      <label class="full">Anon key<input name="anonKey" type="password" placeholder="${config.anonKey ? "Anon key saved in this browser" : "Supabase anon public key"}"></label>
+      <label class="full">Anon key<input name="anonKey" type="password" placeholder="${config.anonKey ? "Anon key configured" : "Supabase anon public key"}"></label>
       <label>Table<input name="table" value="${escapeHtml(config.table)}" placeholder="app_state"></label>
       <label>State row id<input name="stateId" value="${escapeHtml(config.stateId)}" placeholder="main"></label>
-      <p class="form-hint full">Create the table from the README SQL first. The anon key is stored only in this browser.</p>
+      <p class="form-hint full">${hasShippedConfig ? "This site ships with the Supabase URL and public anon key, so every device uses the same backend." : "Add the Supabase URL and public anon key to supabase-config.js to ship them with the site."}</p>
       <button class="primary-btn" type="submit"><i data-lucide="save"></i>Save backend settings</button>
       <button id="supabase-load-now" class="small-btn" type="button"><i data-lucide="download-cloud"></i>Load from Supabase</button>
       <button id="supabase-save-now" class="small-btn" type="button"><i data-lucide="upload-cloud"></i>Save to Supabase</button>
@@ -1276,15 +1279,32 @@ function renderSupabaseSyncPanel() {
 
 function getSupabaseSyncConfig() {
   const fallback = {
-    enabled: false,
-    url: "",
-    anonKey: "",
-    table: "app_state",
-    stateId: SUPABASE_STATE_ID,
+    enabled: Boolean(
+      SHIPPED_SUPABASE_CONFIG.enabled &&
+        SHIPPED_SUPABASE_CONFIG.url &&
+        SHIPPED_SUPABASE_CONFIG.anonKey,
+    ),
+    url: String(SHIPPED_SUPABASE_CONFIG.url || "").replace(/\/+$/, ""),
+    anonKey: String(SHIPPED_SUPABASE_CONFIG.anonKey || ""),
+    table: String(SHIPPED_SUPABASE_CONFIG.table || "app_state"),
+    stateId: String(SHIPPED_SUPABASE_CONFIG.stateId || SUPABASE_STATE_ID),
     status: "",
   };
   try {
-    return { ...fallback, ...JSON.parse(localStorage.getItem(SUPABASE_SYNC_KEY)) };
+    const stored = JSON.parse(localStorage.getItem(SUPABASE_SYNC_KEY)) || {};
+    const storedHasBackend =
+      Boolean(stored.url || stored.anonKey) ||
+      (stored.table && stored.table !== fallback.table) ||
+      (stored.stateId && stored.stateId !== fallback.stateId);
+    const storedEnabledApplies = storedHasBackend || !fallback.enabled;
+    return {
+      enabled: typeof stored.enabled === "boolean" && storedEnabledApplies ? stored.enabled : fallback.enabled,
+      url: String(stored.url || fallback.url).replace(/\/+$/, ""),
+      anonKey: String(stored.anonKey || fallback.anonKey),
+      table: String(stored.table || fallback.table),
+      stateId: String(stored.stateId || fallback.stateId),
+      status: String(stored.status || fallback.status),
+    };
   } catch {
     return fallback;
   }
@@ -1299,14 +1319,14 @@ function handleSaveSupabaseSync(event) {
   if (currentUser.role !== "Coach") return;
   const existing = getSupabaseSyncConfig();
   const form = new FormData(event.currentTarget);
-  const anonKey = form.get("anonKey").trim() || existing.anonKey;
+  const anonKey = String(form.get("anonKey") || "").trim() || existing.anonKey;
   const config = {
     enabled: form.get("enabled") === "on",
-    url: form.get("url").trim().replace(/\/+$/, ""),
+    url: String(form.get("url") || "").trim().replace(/\/+$/, "") || existing.url,
     anonKey,
-    table: form.get("table").trim() || "app_state",
-    stateId: form.get("stateId").trim() || SUPABASE_STATE_ID,
-    status: anonKey ? "Supabase settings saved." : "Supabase settings saved, but no anon key is configured.",
+    table: String(form.get("table") || "").trim() || existing.table || "app_state",
+    stateId: String(form.get("stateId") || "").trim() || existing.stateId || SUPABASE_STATE_ID,
+    status: anonKey ? "Supabase backend settings saved." : "Supabase settings saved, but no anon key is configured.",
   };
   setSupabaseSyncConfig(config);
   renderSiteManager();
