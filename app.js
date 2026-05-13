@@ -19,6 +19,12 @@ const attendanceActions = {
 
 const OUTSIDE_MEETING_DELTA = 0.05;
 
+const PASSWORD_ATTEMPT_LIMITS = {
+  COOLDOWN_ATTEMPTS: 3,
+  COOLDOWN_MINUTES: 10,
+  BLOCK_ATTEMPTS: 7,
+};
+
 const DEFAULT_PASSWORD_HASH = "d3ad9315b7be5dd53b31a273b3b3aba5defe700808305aa16a3062b76658a791";
 const publicPostTypes = ["Update", "Blog", "Link", "Photo", "Social"];
 const DEFAULT_LONG_BLOG_TITLE = "Build log: first sprint goals";
@@ -43,6 +49,10 @@ const seedUsers = [
     section: "All",
     subsection: "All",
     score: MAX_SCORE,
+    failedLoginAttempts: 0,
+    lastFailedAttempt: null,
+    lockedUntil: null,
+    blockedByCoach: false,
   },
   {
     id: "u-eng-head",
@@ -53,6 +63,10 @@ const seedUsers = [
     section: "Engineering",
     subsection: "All",
     score: START_SCORE,
+    failedLoginAttempts: 0,
+    lastFailedAttempt: null,
+    lockedUntil: null,
+    blockedByCoach: false,
   },
   {
     id: "u-media-head",
@@ -63,6 +77,10 @@ const seedUsers = [
     section: "Media",
     subsection: "All",
     score: START_SCORE,
+    failedLoginAttempts: 0,
+    lastFailedAttempt: null,
+    lockedUntil: null,
+    blockedByCoach: false,
   },
   {
     id: "u-alex",
@@ -73,6 +91,10 @@ const seedUsers = [
     section: "Engineering",
     subsection: "Programming",
     score: START_SCORE,
+    failedLoginAttempts: 0,
+    lastFailedAttempt: null,
+    lockedUntil: null,
+    blockedByCoach: false,
   },
   {
     id: "u-nova",
@@ -83,6 +105,10 @@ const seedUsers = [
     section: "Media",
     subsection: "Photography",
     score: START_SCORE,
+    failedLoginAttempts: 0,
+    lastFailedAttempt: null,
+    lockedUntil: null,
+    blockedByCoach: false,
   },
   {
     id: "u-lee",
@@ -93,6 +119,10 @@ const seedUsers = [
     section: "Marketing and Communications",
     subsection: "Outreach",
     score: START_SCORE,
+    failedLoginAttempts: 0,
+    lastFailedAttempt: null,
+    lockedUntil: null,
+    blockedByCoach: false,
   },
 ];
 
@@ -292,6 +322,22 @@ function migrateDb(source) {
       user.subsection = user.role === "Coach" || user.role === "Section Head" ? "All" : firstSubsection(user.section);
       changed = true;
     }
+    if (typeof user.failedLoginAttempts !== "number") {
+      user.failedLoginAttempts = 0;
+      changed = true;
+    }
+    if (!user.lastFailedAttempt) {
+      user.lastFailedAttempt = null;
+      changed = true;
+    }
+    if (!user.lockedUntil) {
+      user.lockedUntil = null;
+      changed = true;
+    }
+    if (typeof user.blockedByCoach !== "boolean") {
+      user.blockedByCoach = false;
+      changed = true;
+    }
   });
   next.meetings.forEach((meeting) => {
     if (!meeting.subsection) {
@@ -337,14 +383,72 @@ function wireLogin() {
     event.preventDefault();
     const email = document.querySelector("#login-email").value.trim().toLowerCase();
     const password = document.querySelector("#login-password").value;
+    const candidate = db.users.find((user) => user.email.toLowerCase() === email);
+
+    // Check if account is blocked by coach
+    if (candidate?.blockedByCoach) {
+      document.querySelector("#login-error").textContent = "This account is blocked. Please contact a coach to reset your password.";
+      return;
+    }
+
+    // Check if account is in cooldown
+    if (candidate?.lockedUntil) {
+      const now = new Date().getTime();
+      if (now < candidate.lockedUntil) {
+        const remainingMinutes = Math.ceil((candidate.lockedUntil - now) / 60000);
+        document.querySelector("#login-error").textContent = `Too many failed attempts. Please try again in ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''}.`;
+        return;
+      } else {
+        // Cooldown expired.
+        candidate.lockedUntil = null;
+        saveDb();
+      }
+    }
+
+    // Check password
     const passwordHash = await hashPassword(password);
-    const user = db.users.find(
-      (candidate) => candidate.email.toLowerCase() === email && candidate.passwordHash === passwordHash,
-    );
+    const user = candidate && candidate.passwordHash === passwordHash ? candidate : null;
+
     if (!user) {
+      if (candidate) {
+        candidate.failedLoginAttempts = (candidate.failedLoginAttempts || 0) + 1;
+        candidate.lastFailedAttempt = new Date().toISOString();
+
+        if (candidate.failedLoginAttempts >= PASSWORD_ATTEMPT_LIMITS.BLOCK_ATTEMPTS) {
+          candidate.blockedByCoach = true;
+          if (candidate.role === "Coach") {
+            document.querySelector("#login-error").textContent = `Account locked after ${PASSWORD_ATTEMPT_LIMITS.BLOCK_ATTEMPTS} failed attempts. \n \n Since you are trying to login as a coach, the account is blocked to prevent unauthorized access. Please contact another coach (or a person who has access to the database) to reset your password.`;
+          } else {
+            document.querySelector("#login-error").textContent = `Account blocked after ${PASSWORD_ATTEMPT_LIMITS.BLOCK_ATTEMPTS} failed attempts. Contact a coach to reset your password.`; 
+          }
+          saveDb();
+          return;
+        }
+
+        if (candidate.failedLoginAttempts >= PASSWORD_ATTEMPT_LIMITS.COOLDOWN_ATTEMPTS) {
+          if (candidate.role === "Coach") {
+            const cooldownTime = PASSWORD_ATTEMPT_LIMITS.COOLDOWN_MINUTES * 30000;
+            document.querySelector("#login-error").textContent = `Too many failed attempts. Try again in ${PASSWORD_ATTEMPT_LIMITS.COOLDOWN_MINUTES / 2} minutes. \n \n Since you are trying to login as a coach, the blocked time was halved.`;
+          } else {
+            const cooldownTime = PASSWORD_ATTEMPT_LIMITS.COOLDOWN_MINUTES * 60000;
+            document.querySelector("#login-error").textContent = `Too many failed attempts. Try again in ${PASSWORD_ATTEMPT_LIMITS.COOLDOWN_MINUTES} minutes or contact a coach to unlock your account.`; 
+          }
+          candidate.lockedUntil = new Date().getTime() + cooldownTime;
+          saveDb();
+          return;
+        }
+
+        saveDb();
+      }
       document.querySelector("#login-error").textContent = "Email or password is incorrect.";
       return;
     }
+
+    // Successful login - reset failed attempts
+    user.failedLoginAttempts = 0;
+    user.lastFailedAttempt = null;
+    user.lockedUntil = null;
+    saveDb();
     setSession(user);
     document.querySelector("#login-error").textContent = "";
     showAuthState();
@@ -403,6 +507,191 @@ function refreshIcons() {
   if (window.lucide) window.lucide.createIcons();
 }
 
+// Modal System
+function showModal(modalId) {
+  document.getElementById("modal-overlay").classList.remove("hidden");
+  document.getElementById("modal-container").classList.remove("hidden");
+  const modal = document.getElementById(modalId);
+  if (modal) modal.classList.remove("hidden");
+}
+
+function hideModals() {
+  document.getElementById("modal-overlay").classList.add("hidden");
+  document.getElementById("modal-container").classList.add("hidden");
+  document.querySelectorAll(".modal").forEach((m) => m.classList.add("hidden"));
+  refreshIcons();
+}
+
+function showAlert(message, title = "Alert") {
+  return new Promise((resolve) => {
+    document.getElementById("modal-alert-title").textContent = title;
+    document.getElementById("modal-alert-message").textContent = message;
+    showModal("modal-alert");
+    refreshIcons();
+
+    const okButton = document.getElementById("modal-alert-ok");
+    const closeButton = document.querySelector("#modal-alert .modal-close");
+    
+    const cleanup = () => {
+      okButton.removeEventListener("click", cleanup);
+      closeButton.removeEventListener("click", cleanup);
+      hideModals();
+      resolve(true);
+    };
+
+    okButton.addEventListener("click", cleanup);
+    closeButton.addEventListener("click", cleanup);
+  });
+}
+
+function showConfirm(message, title = "Confirm") {
+  return new Promise((resolve) => {
+    document.getElementById("modal-confirm-title").textContent = title;
+    document.getElementById("modal-confirm-message").textContent = message;
+    showModal("modal-confirm");
+    refreshIcons();
+
+    const yesButton = document.getElementById("modal-confirm-yes");
+    const noButton = document.getElementById("modal-confirm-no");
+    const closeButton = document.querySelector("#modal-confirm .modal-close");
+    
+    const cleanup = (result) => {
+      yesButton.removeEventListener("click", handleYes);
+      noButton.removeEventListener("click", handleNo);
+      closeButton.removeEventListener("click", handleNo);
+      hideModals();
+      resolve(result);
+    };
+
+    const handleYes = () => cleanup(true);
+    const handleNo = () => cleanup(false);
+
+    yesButton.addEventListener("click", handleYes);
+    noButton.addEventListener("click", handleNo);
+    closeButton.addEventListener("click", handleNo);
+  });
+}
+
+function showPrompt(message, defaultValue = "", title = "Input") {
+  return new Promise((resolve) => {
+    document.getElementById("modal-prompt-title").textContent = title;
+    document.getElementById("modal-prompt-message").textContent = message;
+    const input = document.getElementById("modal-prompt-input");
+    input.value = defaultValue;
+    input.placeholder = "Enter text here...";
+    showModal("modal-prompt");
+    refreshIcons();
+    input.focus();
+
+    const okButton = document.getElementById("modal-prompt-ok");
+    const cancelButton = document.getElementById("modal-prompt-cancel");
+    const closeButton = document.querySelector("#modal-prompt .modal-close");
+    
+    const cleanup = (result) => {
+      okButton.removeEventListener("click", handleOk);
+      cancelButton.removeEventListener("click", handleCancel);
+      closeButton.removeEventListener("click", handleCancel);
+      input.removeEventListener("keypress", handleKeypress);
+      hideModals();
+      resolve(result);
+    };
+
+    const handleOk = () => cleanup(input.value);
+    const handleCancel = () => cleanup(null);
+    const handleKeypress = (e) => {
+      if (e.key === "Enter") cleanup(input.value);
+      if (e.key === "Escape") cleanup(null);
+    };
+
+    okButton.addEventListener("click", handleOk);
+    cancelButton.addEventListener("click", handleCancel);
+    closeButton.addEventListener("click", handleCancel);
+    input.addEventListener("keypress", handleKeypress);
+  });
+}
+
+function showPasswordChange(title = "Change Password", requireCurrent = false) {
+  return new Promise((resolve) => {
+    document.getElementById("modal-password-title").textContent = title;
+    const messageEl = document.getElementById("modal-password-message");
+    messageEl.textContent = requireCurrent
+      ? "Enter a new password for your account."
+      : "Set a new password.";
+    
+    const newInput = document.getElementById("modal-password-new");
+    const confirmInput = document.getElementById("modal-password-confirm");
+    const currentInput = document.getElementById("modal-password-current");
+    const currentLabel = document.getElementById("modal-password-current-label");
+    
+    newInput.value = "";
+    confirmInput.value = "";
+    currentInput.value = "";
+    
+    if (requireCurrent) {
+      currentLabel.style.display = "block";
+    } else {
+      currentLabel.style.display = "none";
+    }
+
+    showModal("modal-password");
+    refreshIcons();
+    newInput.focus();
+
+    const okButton = document.getElementById("modal-password-ok");
+    const cancelButton = document.getElementById("modal-password-cancel");
+    const closeButton = document.querySelector("#modal-password .modal-close");
+    
+    const cleanup = (result) => {
+      okButton.removeEventListener("click", handleOk);
+      cancelButton.removeEventListener("click", handleCancel);
+      closeButton.removeEventListener("click", handleCancel);
+      hideModals();
+      resolve(result);
+    };
+
+    const handleOk = () => {
+      const newPassword = newInput.value;
+      const confirmPassword = confirmInput.value;
+      const currentPassword = currentInput.value;
+
+      if (!newPassword || !confirmPassword) {
+        showAlert("Please fill in all password fields.");
+        return;
+      }
+
+      if (newPassword !== confirmPassword) {
+        showAlert("Passwords do not match.");
+        return;
+      }
+
+      if (requireCurrent && !currentPassword) {
+        showAlert("Current password is required.");
+        return;
+      }
+
+      const result = {
+        newPassword,
+        currentPassword: requireCurrent ? currentPassword : null,
+      };
+
+      cleanup(result);
+    };
+
+    const handleCancel = () => cleanup(null);
+
+    okButton.addEventListener("click", handleOk);
+    cancelButton.addEventListener("click", handleCancel);
+    closeButton.addEventListener("click", handleCancel);
+    
+    // Allow Enter key to submit
+    document.addEventListener("keypress", (e) => {
+      if (e.key === "Enter" && !document.getElementById("modal-password").classList.contains("hidden")) {
+        handleOk();
+      }
+    });
+  });
+}
+
 function render() {
   if (!viewRoot || !viewTitle) return;
   document.querySelectorAll(".nav-item").forEach((button) => {
@@ -411,7 +700,7 @@ function render() {
   const titles = {
     dashboard: "Dashboard",
     members: "Members",
-    meetings: "Meetings",
+    meetings: "Presence",
     agenda: "Agenda",
     messages: "Messages",
     portfolio: "Portfolio",
@@ -580,10 +869,24 @@ function renderDashboard() {
     .sort((a, b) => new Date(a.startsAt) - new Date(b.startsAt))
     .slice(0, 4);
   const warnings = members.filter((member) => member.score < WARNING_THRESHOLD);
+  const lockedUsers = members.filter((member) => member.lockedUntil && new Date().getTime() < member.lockedUntil);
+  const blockedUsers = members.filter((member) => member.blockedByCoach);
 
   if (currentUser.role === "Member") {
     const user = db.users.find((member) => member.id === currentUser.id);
+    const isLocked = user?.lockedUntil && new Date().getTime() < user.lockedUntil;
+    const isBlocked = user?.blockedByCoach;
+    
+    let warningPanel = "";
+    if (isBlocked) {
+      warningPanel = panel("Account Status", `<div class="warning-box blocked"><strong>⚠️ Account Blocked</strong><p>Your account has been locked due to multiple failed login attempts. Please contact a coach to unlock it.</p></div>`);
+    } else if (isLocked) {
+      const remainingMinutes = Math.ceil((user.lockedUntil - new Date().getTime()) / 60000);
+      warningPanel = panel("Account Status", `<div class="warning-box cooldown"><strong>⏱️ Login Cooldown Active</strong><p>Your account is temporarily locked. You can try logging in again in ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''}.</p></div>`);
+    }
+
     viewRoot.innerHTML = `
+      ${warningPanel}
       <div class="grid three">
         ${statCard("Personal Score", scorePill(user.score), "Score can exceed warning recovery plans, but maxes at 7.")}
         ${statCard("Upcoming", upcoming.length, "Meetings and events visible to your section.")}
@@ -598,6 +901,10 @@ function renderDashboard() {
     return;
   }
 
+  const securityWarnings = 
+    (blockedUsers.length > 0 ? `<li class="list-item warning"><strong>${blockedUsers.length} account${blockedUsers.length !== 1 ? 's' : ''} blocked</strong> - Requires coach action</li>` : "") +
+    (lockedUsers.length > 0 ? `<li class="list-item warning"><strong>${lockedUsers.length} account${lockedUsers.length !== 1 ? 's' : ''} on cooldown</strong> - Failed login attempts</li>` : "");
+
   viewRoot.innerHTML = `
     <div class="grid three">
       ${statCard("Visible Members", members.length, "Strictly based on your role permissions.")}
@@ -608,6 +915,11 @@ function renderDashboard() {
       ${panel("Score Warnings", renderMemberMiniList(warnings))}
       ${panel("Upcoming Agenda", renderMeetingList(upcoming))}
     </div>
+    ${
+      securityWarnings
+        ? panel("Security Alerts", `<ul class="list">${securityWarnings}</ul>`)
+        : ""
+    }
     ${panel("Recent Activity", renderActivityFeed(members))}
   `;
 }
@@ -628,6 +940,11 @@ function renderMembers() {
       ${
         currentUser.role === "Coach"
           ? `<button id="add-member" class="primary-btn"><i data-lucide="user-plus"></i>Add member</button>`
+          : ""
+      }
+      ${
+        currentUser.role === "Member"
+          ? `<button id="change-own-password" class="primary-btn"><i data-lucide="key"></i>Change Password</button>`
           : ""
       }
     </div>
@@ -661,6 +978,9 @@ function renderMembers() {
   };
 
   document.querySelector("#member-section-filter")?.addEventListener("change", renderTable);
+  document.querySelector("#change-own-password")?.addEventListener("click", async () => {
+    await handlePasswordChange(currentUser, true);
+  });
   const memberForm = document.querySelector("#member-form");
   memberForm?.addEventListener("submit", handleCreateUser);
   memberForm?.elements.section.addEventListener("change", () => {
@@ -677,9 +997,13 @@ function renderMembersTable(members, editable) {
   const rows = members
     .map((member) => {
       const canEdit = editable.some((item) => item.id === member.id);
+      const isLocked = member.lockedUntil && new Date().getTime() < member.lockedUntil;
+      const isBlocked = member.blockedByCoach;
+      const statusIcon = isBlocked ? "🔒" : isLocked ? "⏱️" : "";
+      const statusClass = isBlocked ? "blocked" : isLocked ? "cooldown" : "";
       return `
-        <tr>
-          <td><strong>${escapeHtml(member.name)}</strong><br><span class="muted">${escapeHtml(member.email)}</span></td>
+        <tr class="${statusClass}">
+          <td><strong>${escapeHtml(member.name)}</strong><br><span class="muted">${escapeHtml(member.email)}</span>${statusIcon ? ` <span class="status-icon">${statusIcon}</span>` : ""}</td>
           <td>${member.role}</td>
           <td><span class="badge">${member.section}</span><br><span class="muted">${member.subsection || "All"}</span></td>
           <td>${scorePill(member.score)}</td>
@@ -692,6 +1016,12 @@ function renderMembersTable(members, editable) {
                     ${
                       currentUser.role === "Coach" && member.id !== currentUser.id
                         ? `<button class="small-btn outside-credit" data-member="${member.id}" ${hasOutsideCreditToday(member) ? "disabled" : ""}><i data-lucide="plus"></i>Outside +${OUTSIDE_MEETING_DELTA}</button>
+                          <button class="small-btn change-password" data-member="${member.id}"><i data-lucide="key"></i>Change password</button>
+                          ${
+                            (isLocked || isBlocked)
+                              ? `<button class="small-btn unlock-account" data-member="${member.id}"><i data-lucide="unlock"></i>Unlock</button>`
+                              : ""
+                          }
                           <button class="danger-btn remove-member" data-member="${member.id}"><i data-lucide="trash-2"></i>Remove</button>`
                         : ""
                     }
@@ -731,13 +1061,35 @@ function wireMemberTable() {
     });
   });
 
-  document.querySelectorAll(".remove-member").forEach((button) => {
+  document.querySelectorAll(".change-password").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const member = db.users.find((user) => user.id === button.dataset.member);
+      if (!member || currentUser.role !== "Coach") return;
+      await handlePasswordChange(member);
+    });
+  });
+
+  document.querySelectorAll(".unlock-account").forEach((button) => {
     button.addEventListener("click", () => {
+      const member = db.users.find((user) => user.id === button.dataset.member);
+      if (!member || currentUser.role !== "Coach") return;
+      member.failedLoginAttempts = 0;
+      member.lastFailedAttempt = null;
+      member.lockedUntil = null;
+      member.blockedByCoach = false;
+      saveDb();
+      renderMembers();
+    });
+  });
+
+  document.querySelectorAll(".remove-member").forEach((button) => {
+    button.addEventListener("click", async () => {
       if (currentUser.role !== "Coach") return;
       const member = db.users.find((user) => user.id === button.dataset.member);
       if (!member || member.id === currentUser.id) return;
-      const confirmed = window.confirm(
+      const confirmed = await showConfirm(
         `Remove ${member.name}? Their meetings, messages, logs, and portfolio entries will be deleted from this local app.`,
+        "Remove Member"
       );
       if (!confirmed) return;
       removeMember(member.id);
@@ -767,7 +1119,7 @@ async function handleCreateUser(event) {
   const form = new FormData(event.currentTarget);
   const email = form.get("email").trim().toLowerCase();
   if (db.users.some((user) => user.email.toLowerCase() === email)) {
-    window.alert("A user with that email already exists.");
+    await showAlert("A user with that email already exists.", "Duplicate Email");
     return;
   }
   const role = form.get("role");
@@ -918,7 +1270,7 @@ function renderMeetingCard(meeting) {
               )
               .join("")}
           </select>
-        </div>
+        </div>F
       `;
     })
     .join("");
@@ -1077,7 +1429,7 @@ function renderMessages() {
     );
   });
   updateAudienceFields();
-  document.querySelector("#message-form").addEventListener("submit", (event) => {
+  document.querySelector("#message-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const audience = parseMessageAudience(
@@ -1087,12 +1439,12 @@ function renderMessages() {
       form.get("privateTarget"),
     );
     if (!audience) {
-      window.alert("Choose a valid message target.");
+      await showAlert("Choose a valid message target.", "Invalid Target");
       return;
     }
     const recipients = messageRecipientsForAudience(audience).filter((user) => user.id !== currentUser.id);
     if (!recipients.length) {
-      window.alert("No recipients match that audience.");
+      await showAlert("No recipients match that audience.", "No Recipients");
       return;
     }
     db.messages.push({
@@ -1209,10 +1561,11 @@ function renderSiteManager() {
   document.querySelector("#git-sync-form")?.addEventListener("submit", handleSaveGitSync);
   document.querySelector("#git-sync-now")?.addEventListener("click", () => syncDbToGitHub(true));
   document.querySelectorAll(".delete-post").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       const post = db.publicPosts.find((item) => item.id === button.dataset.post);
       if (!post || !canDeletePost(post)) return;
-      if (!window.confirm(`Delete "${post.title}" from the public page?`)) return;
+      const confirmed = await showConfirm(`Delete "${post.title}" from the public page?`, "Delete Post");
+      if (!confirmed) return;
       db.publicPosts = db.publicPosts.filter((item) => item.id !== post.id);
       saveDb();
       renderPublicSite();
@@ -1967,4 +2320,54 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+async function handlePasswordChange(member, isOwnPassword = false) {
+  const canChange = isOwnPassword || (currentUser.role === "Coach" && member.id !== currentUser.id);
+  if (!canChange) return;
+
+  const isBlocked = member.blockedByCoach;
+  const isLocked = member.lockedUntil && new Date().getTime() < member.lockedUntil;
+
+  const result = await showPasswordChange(
+    isOwnPassword ? "Change Your Password" : `Set Password for ${member.name}`,
+    isOwnPassword
+  );
+
+  if (!result) return;
+
+  const { newPassword, currentPassword } = result;
+
+  // Verify current password if required
+  if (isOwnPassword) {
+    const currentHash = await hashPassword(currentPassword);
+    if (currentHash !== member.passwordHash) {
+      await showAlert("Current password is incorrect.", "Invalid Password");
+      return;
+    }
+  }
+
+  // Update password
+  const newHash = await hashPassword(newPassword);
+  member.passwordHash = newHash;
+  member.failedLoginAttempts = 0;
+  member.lastFailedAttempt = null;
+  member.lockedUntil = null;
+  member.blockedByCoach = false;
+
+  saveDb();
+
+  const statusMessage = isLocked || isBlocked ? " Account has been unlocked." : "";
+  await showAlert(
+    `Password${isOwnPassword ? "" : ` for ${member.name}`} has been updated successfully.${statusMessage}`,
+    "Password Updated"
+  );
+
+  if (isOwnPassword) {
+    // Re-render without re-authenticating
+    currentUser = db.users.find((u) => u.id === currentUser.id);
+    render();
+  } else {
+    renderMembers();
+  }
 }

@@ -141,5 +141,78 @@
         <section id="view-root" class="view-root" aria-live="polite"></section>
       </section>
     </main>
+
+    <!-- Modal System -->
+    <div id="modal-overlay" class="modal-overlay hidden"></div>
+    <div id="modal-container" class="modal-container hidden">
+      <div class="modal modal-alert hidden" id="modal-alert">
+        <div class="modal-header">
+          <h3 id="modal-alert-title">Alert</h3>
+          <button class="modal-close" aria-label="Close"><i data-lucide="x"></i></button>
+        </div>
+        <div class="modal-body">
+          <p id="modal-alert-message"></p>
+        </div>
+        <div class="modal-footer">
+          <button id="modal-alert-ok" class="primary-btn"><i data-lucide="check"></i>OK</button>
+        </div>
+      </div>
+
+      <div class="modal modal-confirm hidden" id="modal-confirm">
+        <div class="modal-header">
+          <h3 id="modal-confirm-title">Confirm</h3>
+          <button class="modal-close" aria-label="Close"><i data-lucide="x"></i></button>
+        </div>
+        <div class="modal-body">
+          <p id="modal-confirm-message"></p>
+        </div>
+        <div class="modal-footer">
+          <button id="modal-confirm-yes" class="primary-btn"><i data-lucide="check"></i>Yes</button>
+          <button id="modal-confirm-no" class="ghost-btn"><i data-lucide="x"></i>No</button>
+        </div>
+      </div>
+
+      <div class="modal modal-prompt hidden" id="modal-prompt">
+        <div class="modal-header">
+          <h3 id="modal-prompt-title">Input</h3>
+          <button class="modal-close" aria-label="Close"><i data-lucide="x"></i></button>
+        </div>
+        <div class="modal-body">
+          <p id="modal-prompt-message"></p>
+          <input id="modal-prompt-input" type="text" class="modal-input" placeholder="Enter text here...">
+        </div>
+        <div class="modal-footer">
+          <button id="modal-prompt-ok" class="primary-btn"><i data-lucide="check"></i>OK</button>
+          <button id="modal-prompt-cancel" class="ghost-btn"><i data-lucide="x"></i>Cancel</button>
+        </div>
+      </div>
+
+      <div class="modal modal-password hidden" id="modal-password">
+        <div class="modal-header">
+          <h3 id="modal-password-title">Change Password</h3>
+          <button class="modal-close" aria-label="Close"><i data-lucide="x"></i></button>
+        </div>
+        <div class="modal-body">
+          <p id="modal-password-message"></p>
+          <label style="display: block; margin-bottom: 12px;">
+            <span class="form-label">New Password</span>
+            <input id="modal-password-new" type="password" class="modal-input" placeholder="Enter new password...">
+          </label>
+          <label style="display: block; margin-bottom: 12px;">
+            <span class="form-label">Confirm Password</span>
+            <input id="modal-password-confirm" type="password" class="modal-input" placeholder="Confirm password...">
+          </label>
+          <label id="modal-password-current-label" style="display: none; margin-bottom: 12px;">
+            <span class="form-label">Current Password</span>
+            <input id="modal-password-current" type="password" class="modal-input" placeholder="Enter current password...">
+          </label>
+        </div>
+        <div class="modal-footer">
+          <button id="modal-password-ok" class="primary-btn"><i data-lucide="check"></i>Set Password</button>
+          <button id="modal-password-cancel" class="ghost-btn"><i data-lucide="x"></i>Cancel</button>
+        </div>
+      </div>
+    </div>
+
   </body>
 </html>
