@@ -7,6 +7,7 @@
     <link rel="icon" type="image/svg+xml" href="assets/logo-icon.png" />
     <link rel="stylesheet" href="styles.css" />
     <script src="https://unpkg.com/lucide@latest" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" defer></script>
     <script src="supabase-config.js" defer></script>
     <script src="app.js" defer></script>
   </head>
@@ -30,6 +31,8 @@
           </button>
         </nav>
       </header>
+
+      <section id="public-announcement" class="public-announcement hidden" aria-live="polite"></section>
 
       <section class="public-hero">
         <div>
@@ -64,11 +67,15 @@
           </label>
           <label>
             Password
-            <input id="login-password" type="password" autocomplete="current-password" required />
+            <input id="login-password" type="password" autocomplete="current-password" />
           </label>
           <button class="primary-btn" type="submit">
             <i data-lucide="log-in"></i>
             Sign in
+          </button>
+          <button id="magic-link-login" class="ghost-btn" type="button">
+            <i data-lucide="mail"></i>
+            Email sign-in link
           </button>
           <p id="login-error" class="error-text" role="alert"></p>
           <button id="back-public" class="ghost-btn" type="button">
@@ -138,6 +145,8 @@
           </div>
         </header>
 
+        <section id="app-announcement" class="public-announcement app-announcement hidden" aria-live="polite"></section>
+
         <section id="view-root" class="view-root" aria-live="polite"></section>
       </section>
     </main>
@@ -184,32 +193,6 @@
         <div class="modal-footer">
           <button id="modal-prompt-ok" class="primary-btn"><i data-lucide="check"></i>OK</button>
           <button id="modal-prompt-cancel" class="ghost-btn"><i data-lucide="x"></i>Cancel</button>
-        </div>
-      </div>
-
-      <div class="modal modal-password hidden" id="modal-password">
-        <div class="modal-header">
-          <h3 id="modal-password-title">Change Password</h3>
-          <button class="modal-close" aria-label="Close"><i data-lucide="x"></i></button>
-        </div>
-        <div class="modal-body">
-          <p id="modal-password-message"></p>
-          <label style="display: block; margin-bottom: 12px;">
-            <span class="form-label">New Password</span>
-            <input id="modal-password-new" type="password" class="modal-input" placeholder="Enter new password...">
-          </label>
-          <label style="display: block; margin-bottom: 12px;">
-            <span class="form-label">Confirm Password</span>
-            <input id="modal-password-confirm" type="password" class="modal-input" placeholder="Confirm password...">
-          </label>
-          <label id="modal-password-current-label" style="display: none; margin-bottom: 12px;">
-            <span class="form-label">Current Password</span>
-            <input id="modal-password-current" type="password" class="modal-input" placeholder="Enter current password...">
-          </label>
-        </div>
-        <div class="modal-footer">
-          <button id="modal-password-ok" class="primary-btn"><i data-lucide="check"></i>Set Password</button>
-          <button id="modal-password-cancel" class="ghost-btn"><i data-lucide="x"></i>Cancel</button>
         </div>
       </div>
     </div>

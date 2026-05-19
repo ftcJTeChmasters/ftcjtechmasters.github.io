@@ -6,6 +6,7 @@
     <title>About | JTeChmasters</title>
     <link rel="stylesheet" href="../styles.css" />
     <script src="https://unpkg.com/lucide@latest" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" defer></script>
     <script src="../supabase-config.js" defer></script>
     <script src="../app.js" defer></script>
   </head>
@@ -23,12 +24,14 @@
           <a href="../">Home</a>
           <a href="../blogs/">Blogs</a>
           <a href="./" aria-current="page">About</a>
-          <a class="primary-btn" href="../">
+          <a class="primary-btn" href="../#login">
             <i data-lucide="lock-keyhole"></i>
             Member login
           </a>
         </nav>
       </header>
+
+      <section id="public-announcement" class="public-announcement hidden" aria-live="polite"></section>
 
       <section class="page-hero">
         <p class="eyebrow">About Us</p>
@@ -38,6 +41,12 @@
       </section>
 
       <section id="public-about" class="public-about public-about-page" aria-label="About JTeChmasters"></section>
+      <section class="public-login-strip" aria-label="Member access">
+        <a class="primary-btn" href="../#login">
+          <i data-lucide="lock-keyhole"></i>
+          Member login
+        </a>
+      </section>
     </main>
   </body>
 </html>

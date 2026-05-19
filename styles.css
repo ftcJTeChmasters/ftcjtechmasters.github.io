@@ -82,6 +82,118 @@ button {
   background: var(--panel-strong);
 }
 
+.public-announcement {
+  display: block;
+  width: 100%;
+  margin: 0 0 18px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.public-announcement.app-announcement {
+  width: calc(100% + 56px);
+  margin: 0 -28px 18px;
+  border: none;
+  border-radius: 0;
+}
+
+.public-announcement .announcement-content {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 14px 18px;
+  border-radius: 0;
+  color: #fff;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.16);
+}
+
+.public-announcement .announcement-left {
+  flex: 0 0 auto;
+}
+
+.public-announcement .announcement-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.public-announcement-issue .announcement-content {
+  background: linear-gradient(90deg, #d94c51, #f05d5f);
+}
+
+.public-announcement-maintenance .announcement-content {
+  background: linear-gradient(90deg, #f4c152, #f7d46b);
+  color: #322f18;
+}
+
+.public-announcement-resolved .announcement-content {
+  background: linear-gradient(90deg, #2c8d46, #61b75f);
+}
+
+.public-announcement-update .announcement-content {
+  background: linear-gradient(90deg, #2f6ab0, #4f95d7);
+}
+
+.announcement-type {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  padding: 8px 14px;
+  color: inherit;
+  font-size: 0.76rem;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.public-announcement strong {
+  display: block;
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.35;
+}
+
+.public-announcement p {
+  margin: 0;
+  color: inherit;
+  opacity: 0.95;
+  line-height: 1.5;
+}
+
+.announcement-close {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  color: inherit;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.announcement-close:hover {
+  background: rgba(255, 255, 255, 0.26);
+}
+
+@media (max-width: 780px) {
+  .public-announcement .announcement-content {
+    flex-wrap: wrap;
+    align-items: stretch;
+  }
+
+  .announcement-close {
+    margin-left: auto;
+  }
+}
+
 .public-hero {
   display: grid;
   align-items: end;
@@ -146,6 +258,12 @@ button {
 
 .public-about-page {
   margin-top: 0;
+}
+
+.public-login-strip {
+  display: flex;
+  justify-content: center;
+  padding: 24px clamp(16px, 5vw, 56px) 48px;
 }
 
 .public-grid {
@@ -902,6 +1020,14 @@ tr:hover .assignments-cell {
 
   .update-card {
     grid-template-columns: 1fr;
+  }
+
+  .public-announcement {
+    grid-template-columns: 1fr;
+  }
+
+  .announcement-type {
+    width: fit-content;
   }
 
   .sidebar {

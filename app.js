@@ -1,15 +1,17 @@
 "use strict";
 
 const STORAGE_KEY = "robotics-attendance-hub-v1";
-const SESSION_KEY = "robotics-attendance-session";
 const GIT_SYNC_KEY = "robotics-attendance-git-sync";
 const SUPABASE_SYNC_KEY = "robotics-attendance-supabase-sync";
 const SUPABASE_STATE_ID = "main";
+const BACKUP_PIN_SESSION_KEY = "robotics-attendance-backup-pin-hash";
+const FIRST_LOGIN_SEEN_KEY = "robotics-attendance-first-login-walkthrough";
 const SHIPPED_SUPABASE_CONFIG =
   typeof window !== "undefined" && window.JTECHMASTERS_SUPABASE ? window.JTECHMASTERS_SUPABASE : {};
 const DB_SAVE_RATE_LIMIT_MS = 500;
 const SUPABASE_REFRESH_INTERVAL_MS = 30000;
 let dbSaveTimer = null;
+let authUsersLoaded = false;
 const MAX_SCORE = 7;
 const START_SCORE = 2;
 const WARNING_THRESHOLD = 0;
@@ -22,13 +24,6 @@ const attendanceActions = {
 
 const OUTSIDE_MEETING_DELTA = 0.05;
 
-const PASSWORD_ATTEMPT_LIMITS = {
-  COOLDOWN_ATTEMPTS: 3,
-  COOLDOWN_MINUTES: 10,
-  BLOCK_ATTEMPTS: 7,
-};
-
-const DEFAULT_PASSWORD_HASH = "d3ad9315b7be5dd53b31a273b3b3aba5defe700808305aa16a3062b76658a791";
 const publicPostTypes = ["Update", "Blog", "Link", "Photo", "Social"];
 const DEFAULT_LONG_BLOG_TITLE = "Build log: first sprint goals";
 const DEFAULT_LONG_BLOG_BODY =
@@ -271,87 +266,63 @@ function initAssignmentsInput() {
 const seedUsers = [
   {
     id: "u-coach",
+    authUserId: "00000000-0000-4000-8000-000000000001",
     name: "Morgan Coach",
     email: "coach@team.local",
-    passwordHash: DEFAULT_PASSWORD_HASH,
     role: "Coach",
     section: "All",
     subsection: "All",
     score: MAX_SCORE,
-    failedLoginAttempts: 0,
-    lastFailedAttempt: null,
-    lockedUntil: null,
-    blockedByCoach: false,
   },
   {
     id: "u-eng-head",
+    authUserId: "00000000-0000-4000-8000-000000000002",
     name: "Sam Engineering",
     email: "engineering@team.local",
-    passwordHash: DEFAULT_PASSWORD_HASH,
     role: "Section Head",
     section: "Engineering",
     subsection: "All",
     score: START_SCORE,
-    failedLoginAttempts: 0,
-    lastFailedAttempt: null,
-    lockedUntil: null,
-    blockedByCoach: false,
   },
   {
     id: "u-media-head",
+    authUserId: "00000000-0000-4000-8000-000000000003",
     name: "Riley Media",
     email: "media@team.local",
-    passwordHash: DEFAULT_PASSWORD_HASH,
     role: "Section Head",
     section: "Media",
     subsection: "All",
     score: START_SCORE,
-    failedLoginAttempts: 0,
-    lastFailedAttempt: null,
-    lockedUntil: null,
-    blockedByCoach: false,
   },
   {
     id: "u-alex",
+    authUserId: "00000000-0000-4000-8000-000000000004",
     name: "Alex Vermeer",
     email: "alex@team.local",
-    passwordHash: DEFAULT_PASSWORD_HASH,
     role: "Member",
     section: "Engineering",
     subsection: "Programming",
     score: START_SCORE,
-    failedLoginAttempts: 0,
-    lastFailedAttempt: null,
-    lockedUntil: null,
-    blockedByCoach: false,
   },
   {
     id: "u-nova",
+    authUserId: "00000000-0000-4000-8000-000000000005",
     name: "Nova Jansen",
     email: "nova@team.local",
-    passwordHash: DEFAULT_PASSWORD_HASH,
     role: "Member",
     section: "Media",
     subsection: "Photography",
     score: START_SCORE,
-    failedLoginAttempts: 0,
-    lastFailedAttempt: null,
-    lockedUntil: null,
-    blockedByCoach: false,
   },
   {
     id: "u-lee",
+    authUserId: "00000000-0000-4000-8000-000000000006",
     name: "Lee Bakker",
     email: "lee@team.local",
-    passwordHash: DEFAULT_PASSWORD_HASH,
     role: "Member",
     section: "Marketing and Communications",
     subsection: "Outreach",
     score: START_SCORE,
-    failedLoginAttempts: 0,
-    lastFailedAttempt: null,
-    lockedUntil: null,
-    blockedByCoach: false,
   },
 ];
 
@@ -365,24 +336,7 @@ const defaultDb = () => {
   weekend.setHours(10, 0, 0, 0);
 
   return {
-    users: seedUsers.map((user) => ({
-      ...user,
-      activityLog: [
-        {
-          id: crypto.randomUUID(),
-          at: now.toISOString(),
-          actorId: "system",
-          type: "created",
-          note: `Initial score set to ${user.score}.`,
-          delta: 0,
-          previousScore: user.score,
-          newScore: user.score,
-          reversible: false,
-          reversed: false,
-        },
-      ],
-      portfolio: [],
-    })),
+    users: [],
     meetings: [
       {
         id: crypto.randomUUID(),
@@ -456,6 +410,13 @@ const defaultDb = () => {
       aboutTitle: "About JTeChmasters",
       aboutBody:
         "JTeChmasters is an FTC robotics team building robots, software, media, outreach projects, and match-day confidence together.",
+      announcement: {
+        enabled: false,
+        type: "Update",
+        title: "",
+        body: "",
+        updatedAt: "",
+      },
       socials: [
         { label: "Instagram", url: "https://www.instagram.com/" },
         { label: "FIRST FTC", url: "https://www.firstinspires.org/robotics/ftc" },
@@ -465,6 +426,8 @@ const defaultDb = () => {
 };
 
 let db = loadDb();
+let supabaseClient = null;
+let currentAuthSession = null;
 let currentUser = getSessionUser();
 let currentView = "dashboard";
 let gitAutosaveTimer = null;
@@ -473,6 +436,7 @@ let supabaseAutosaveTimer = null;
 let supabaseRemoteBusy = false;
 let supabaseRefreshTimer = null;
 let supabaseInitialLoadDone = false;
+const authProfileSaveTimers = new Map();
 
 const viewRoot = document.querySelector("#view-root");
 const viewTitle = document.querySelector("#view-title");
@@ -480,32 +444,28 @@ const viewTitle = document.querySelector("#view-title");
 document.addEventListener("DOMContentLoaded", async () => {
   wireLogin();
   wireChrome();
+  await initSupabaseAuth();
   await loadDbFromSupabase();
+  currentUser = getSessionUser();
   renderPublicSite();
   showAuthState();
 });
 
 function loadDb() {
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if (!raw) {
-    const fresh = defaultDb();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
-    return fresh;
-  }
+  localStorage.removeItem(STORAGE_KEY);
+  const raw = null;
   try {
-    const parsed = JSON.parse(raw);
+    const parsed = raw ? JSON.parse(raw) : {};
     return migrateDb(parsed);
   } catch {
-    const fresh = defaultDb();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
-    return fresh;
+    return migrateDb({});
   }
 }
 
 function migrateDb(source) {
   const fresh = defaultDb();
   const next = {
-    users: Array.isArray(source.users) ? source.users : fresh.users,
+    users: [],
     meetings: Array.isArray(source.meetings) ? source.meetings : fresh.meetings,
     messages: Array.isArray(source.messages) ? source.messages : fresh.messages,
     publicPosts: Array.isArray(source.publicPosts) ? source.publicPosts : fresh.publicPosts,
@@ -516,6 +476,15 @@ function migrateDb(source) {
   if (!Array.isArray(next.site.socials)) {
     next.site.socials = fresh.site.socials;
     changed = true;
+  }
+  if (!next.site.announcement || typeof next.site.announcement !== "object") {
+    next.site.announcement = fresh.site.announcement;
+    changed = true;
+  } else {
+    next.site.announcement = {
+      ...fresh.site.announcement,
+      ...next.site.announcement,
+    };
   }
   if (!next.site.aboutTitle) {
     next.site.aboutTitle = fresh.site.aboutTitle;
@@ -542,73 +511,16 @@ function migrateDb(source) {
       changed = true;
     }
   });
-  next.users.forEach((user) => {
-    if (!user.passwordHash && user.password) {
-      user.passwordHash = DEFAULT_PASSWORD_HASH;
-      delete user.password;
-      changed = true;
-    }
-    if (!Array.isArray(user.assignments) || !user.assignments.length) {
-      user.assignments = [
-        {
-          section: String(user.section || "All"),
-          subsection: String(
-            user.subsection ||
-              (user.role === "Coach" || user.role === "Section Head"
-                ? "All"
-                : firstSubsection(String(user.section || sections[0]))),
-          ),
-        },
-      ];
-      changed = true;
-    }
-    user.assignments = user.assignments.map((assignment) => ({
-      section: String(assignment.section || user.section || "All"),
-      subsection: String(
-        assignment.subsection ||
-          (assignment.section === "All"
-            ? "All"
-            : firstSubsection(String(assignment.section || user.section || sections[0]))),
-      ),
-    }));
-    if (!user.section) {
-      user.section = user.assignments[0]?.section || "All";
-      changed = true;
-    }
-    if (!user.subsection) {
-      user.subsection = user.assignments[0]?.subsection || "All";
-      changed = true;
-    }
-    if (typeof user.failedLoginAttempts !== "number") {
-      user.failedLoginAttempts = 0;
-      changed = true;
-    }
-    if (!user.lastFailedAttempt) {
-      user.lastFailedAttempt = null;
-      changed = true;
-    }
-    if (!user.lockedUntil) {
-      user.lockedUntil = null;
-      changed = true;
-    }
-    if (typeof user.blockedByCoach !== "boolean") {
-      user.blockedByCoach = false;
-      changed = true;
-    }
-  });
   next.meetings.forEach((meeting) => {
     if (!meeting.subsection) {
       meeting.subsection = "All";
       changed = true;
     }
   });
-  if (changed) localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
   return next;
 }
 
 function saveDb() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
-
   if (dbSaveTimer) {
     clearTimeout(dbSaveTimer);
   }
@@ -621,17 +533,339 @@ function saveDb() {
 }
 
 function getSessionUser() {
-  const id = sessionStorage.getItem(SESSION_KEY);
-  return db.users.find((user) => user.id === id) || null;
+  const session = getAuthSession();
+  const authUser = session?.user;
+  if (!authUser) return null;
+  const email = String(authUser.email || "").toLowerCase();
+  const storedProfile =
+    db.users.find((user) => user.authUserId === authUser.id) ||
+    db.users.find((user) => String(user.email || "").toLowerCase() === email) ||
+    null;
+  return authProfileFromSupabaseUser(authUser, storedProfile);
 }
 
-function setSession(user) {
-  currentUser = user;
-  if (user) sessionStorage.setItem(SESSION_KEY, user.id);
-  else sessionStorage.removeItem(SESSION_KEY);
+function authProfileFromSupabaseUser(authUser, storedProfile = null) {
+  const metadata = {
+    ...(authUser.user_metadata || {}),
+    ...(authUser.app_metadata || {}),
+  };
+  const fallbackEmail = String(authUser.email || storedProfile?.email || "").toLowerCase();
+  const fallbackAssignments = storedProfile?.assignments || [{ section: "All", subsection: "All" }];
+  const assignments = Array.isArray(metadata.assignments) && metadata.assignments.length
+    ? metadata.assignments.map((assignment) => ({
+        section: String(assignment.section || "All"),
+        subsection: String(assignment.subsection || "All"),
+      }))
+    : [{
+        section: String(metadata.section || storedProfile?.section || fallbackAssignments[0]?.section || "All"),
+        subsection: String(metadata.subsection || storedProfile?.subsection || fallbackAssignments[0]?.subsection || "All"),
+      }];
+  const role = String(metadata.role || storedProfile?.role || "Member");
+  const name = String(
+    metadata.name ||
+      metadata.full_name ||
+      metadata.display_name ||
+      storedProfile?.name ||
+      fallbackEmail ||
+      "Temporary Coach",
+  );
+
+  return {
+    ...(storedProfile || {}),
+    id: storedProfile?.id || authUser.id,
+    authUserId: authUser.id,
+    name,
+    email: fallbackEmail,
+    role,
+    section: assignments[0]?.section || "All",
+    subsection: assignments[0]?.subsection || "All",
+    sections: assignments.map((assignment) => assignment.section),
+    subsections: assignments.map((assignment) => assignment.subsection),
+    assignments,
+    score: Number(metadata.score ?? storedProfile?.score ?? MAX_SCORE),
+    portfolio: storedProfile?.portfolio || [],
+    activityLog: storedProfile?.activityLog || [],
+    needsPasswordChange: Boolean(metadata.needsPasswordChange ?? storedProfile?.needsPasswordChange),
+    temporaryCoach: false,
+  };
+}
+
+function getSupabaseClient() {
+  const config = getSupabaseSyncConfig();
+  if (!isSupabaseConfigured(config)) return null;
+  if (!window.supabase?.createClient) {
+    throw new Error("Supabase JavaScript client is not loaded.");
+  }
+  if (!supabaseClient) {
+    supabaseClient = window.supabase.createClient(config.url, config.anonKey, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+      },
+    });
+  }
+  return supabaseClient;
+}
+
+async function initSupabaseAuth() {
+  const client = getSupabaseClient();
+  if (!client) return;
+  const { data, error } = await client.auth.getSession();
+  if (error) {
+    currentAuthSession = null;
+    return;
+  }
+  currentAuthSession = data.session || null;
+  client.auth.onAuthStateChange((_event, session) => {
+    currentAuthSession = session || null;
+    currentUser = hasBackupAccess() ? backupAccessProfile() : getSessionUser();
+  });
+}
+
+function getAuthSession() {
+  return currentAuthSession;
+}
+
+function getBackupPinHash() {
+  return sessionStorage.getItem(BACKUP_PIN_SESSION_KEY) || "";
+}
+
+function hasBackupAccess() {
+  return Boolean(getBackupPinHash());
+}
+
+async function sha256Hex(value) {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function backupAccessProfile() {
+  return {
+    id: "backup-access",
+    authUserId: "backup-access",
+    name: "Backup Access",
+    email: "backup@local",
+    role: "Coach",
+    section: "All",
+    subsection: "All",
+    assignments: [{ section: "All", subsection: "All" }],
+    score: MAX_SCORE,
+    portfolio: [],
+    activityLog: [],
+    backupAccess: true,
+  };
+}
+
+async function signInWithSupabaseAuth(email, password) {
+  const client = getSupabaseClient();
+  if (!client) {
+    throw new Error("Supabase is not configured yet. Add the URL and anon key to supabase-config.js.");
+  }
+  const { data, error } = await client.auth.signInWithPassword({
+    email,
+    password,
+  });
+  if (error) throw new Error(error.message || "Email or password is incorrect.");
+  currentAuthSession = data.session || null;
+  return getSessionUser();
+}
+
+async function sendSupabaseMagicLink(email) {
+  const client = getSupabaseClient();
+  if (!client) {
+    throw new Error("Supabase is not configured yet. Add the URL and anon key to supabase-config.js.");
+  }
+  const { error } = await client.auth.signInWithOtp({
+    email,
+    options: {
+      emailRedirectTo: window.location.origin + window.location.pathname,
+    },
+  });
+  if (error) throw new Error(error.message || "Could not send sign-in link.");
+}
+
+async function callSupabaseAuthAction(action, body) {
+  const config = getSupabaseSyncConfig();
+  if (!isSupabaseConfigured(config)) {
+    throw new Error("Supabase is not configured yet. Add the URL and anon key to supabase-config.js.");
+  }
+  if (!getAuthSession()?.access_token && action !== "verify-backup-pin") {
+    if (!hasBackupAccess()) {
+      throw new Error("Sign in again before changing Supabase Auth users.");
+    }
+  }
+
+  let response;
+  try {
+    response = await fetch(supabaseFunctionUrl(config), {
+      method: "POST",
+      headers: {
+        ...supabaseHeaders(),
+        "x-state-id": config.stateId,
+        ...(hasBackupAccess() ? { "x-backup-pin-hash": getBackupPinHash() } : {}),
+      },
+      body: JSON.stringify({
+        action,
+        ...(hasBackupAccess() ? { backupPinHash: getBackupPinHash() } : {}),
+        ...body,
+      }),
+    });
+  } catch (error) {
+    const detail = error?.message ? ` (${error.message})` : "";
+    throw new Error(
+      `Could not reach the Supabase Edge Function "${config.functionName}". Refresh the page after deploying the latest function and check that CORS/preflight succeeds.${detail}`,
+    );
+  }
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    if (response.status === 404) {
+      throw new Error(
+        `Supabase could not find the Edge Function "${config.functionName}" at ${supabaseFunctionUrl(config)}. Deploy it to project jpfipvcwxwaxehgmjlne or update supabase-config.js to the deployed function name.`,
+      );
+    }
+    throw new Error(payload.error || `Supabase Auth action failed: ${response.status}`);
+  }
+  return payload;
+}
+
+function normalizeAuthUserProfile(user) {
+  const assignments = Array.isArray(user.assignments) && user.assignments.length
+    ? user.assignments.map((assignment) => ({
+        section: String(assignment.section || "All"),
+        subsection: String(assignment.subsection || "All"),
+      }))
+    : [{
+        section: String(user.section || "All"),
+        subsection: String(user.subsection || "All"),
+      }];
+  const authUserId = String(user.authUserId || user.id || "");
+  return {
+    id: authUserId || String(user.id || crypto.randomUUID()),
+    authUserId,
+    name: String(user.name || user.email || "Member"),
+    email: String(user.email || "").toLowerCase(),
+    role: String(user.role || "Member"),
+    section: assignments[0]?.section || "All",
+    subsection: assignments[0]?.subsection || "All",
+    sections: assignments.map((assignment) => assignment.section),
+    subsections: assignments.map((assignment) => assignment.subsection),
+    assignments,
+    score: clampScore(Number(user.score ?? START_SCORE)),
+    portfolio: Array.isArray(user.portfolio) ? user.portfolio : [],
+    activityLog: Array.isArray(user.activityLog) ? user.activityLog : [],
+    needsPasswordChange: Boolean(user.needsPasswordChange),
+  };
+}
+
+async function saveAuthProfile(user) {
+  const result = await callSupabaseAuthAction("update-auth-profile", {
+    profile: user,
+  });
+  if (result.authUserId && user.authUserId !== result.authUserId) {
+    user.authUserId = result.authUserId;
+    user.id = result.authUserId;
+  }
+  return result;
+}
+
+function authMetadataFromProfile(user) {
+  return {
+    name: String(user.name || ""),
+    role: String(user.role || "Member"),
+    section: String(user.section || "All"),
+    subsection: String(user.subsection || "All"),
+    assignments: Array.isArray(user.assignments) ? user.assignments : [],
+    score: Number(user.score ?? START_SCORE),
+    portfolio: Array.isArray(user.portfolio) ? user.portfolio : [],
+    activityLog: Array.isArray(user.activityLog) ? user.activityLog : [],
+    needsPasswordChange: Boolean(user.needsPasswordChange),
+  };
+}
+
+async function updateOwnSupabasePassword(member, password) {
+  const client = getSupabaseClient();
+  if (!client) throw new Error("Supabase is not configured yet.");
+  const profile = {
+    ...member,
+    needsPasswordChange: false,
+  };
+  const { data, error } = await client.auth.updateUser({
+    password,
+    data: authMetadataFromProfile(profile),
+  });
+  if (error) throw new Error(error.message || "Could not update your password.");
+  currentAuthSession = data?.session || getAuthSession();
+  return data?.user || null;
+}
+
+async function loadAuthUsersFromSupabase(manual = false) {
+  const config = getSupabaseSyncConfig();
+  if (!config.enabled && !manual) return;
+  if (!isSupabaseConfigured(config)) {
+    updateSupabaseStatus("Supabase is missing a project URL or anon key.");
+    return;
+  }
+  if (!getAuthSession()?.access_token) {
+    if (!hasBackupAccess()) {
+      updateSupabaseStatus("Sign in before loading Supabase Auth users.");
+      return;
+    }
+  }
+
+  const headers = {
+    ...supabaseHeaders(),
+    ...(hasBackupAccess() ? { "x-backup-pin-hash": getBackupPinHash() } : {}),
+  };
+
+  try {
+    const response = await fetch(
+      `${supabaseFunctionUrl(config)}?resource=users&id=${encodeURIComponent(config.stateId)}`,
+      {
+        headers,
+      },
+    );
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `Supabase Auth users load failed: ${response.status}`);
+    if (payload.usersError) throw new Error(payload.usersError);
+    db.users = Array.isArray(payload.users) ? payload.users.map(normalizeAuthUserProfile) : [];
+    authUsersLoaded = true;
+    currentUser = hasBackupAccess() ? backupAccessProfile() : getSessionUser();
+    updateSupabaseStatus(`Loaded Supabase Auth users ${formatDate(new Date().toISOString())}.`);
+    if (currentUser && viewRoot && viewTitle) render();
+  } catch (error) {
+    authUsersLoaded = false;
+    updateSupabaseStatus(error.message || "Could not load Supabase Auth users.");
+    if (manual) await showAlert(error.message || "Could not load Supabase Auth users.", "Supabase Auth");
+  }
+}
+
+function scheduleAuthProfileSave(user) {
+  if (!user?.authUserId) return;
+  clearTimeout(authProfileSaveTimers.get(user.authUserId));
+  authProfileSaveTimers.set(
+    user.authUserId,
+    setTimeout(() => {
+      authProfileSaveTimers.delete(user.authUserId);
+      saveAuthProfile(user).catch((error) => updateSupabaseStatus(error.message || "Could not save Auth profile."));
+    }, 300),
+  );
+}
+
+async function signOutOfSupabaseAuth() {
+  const client = getSupabaseClient();
+  if (client) await client.auth.signOut().catch(() => {});
+  currentAuthSession = null;
+  currentUser = null;
 }
 
 function wireLogin() {
+  wireBackupAccessGesture();
+  handlePublicEntryHash();
+
   document.querySelector("#open-login")?.addEventListener("click", () => {
     document.querySelector("#public-site").classList.add("hidden");
     document.querySelector("#login-screen").classList.remove("hidden");
@@ -648,82 +882,114 @@ function wireLogin() {
     event.preventDefault();
     const email = document.querySelector("#login-email").value.trim().toLowerCase();
     const password = document.querySelector("#login-password").value;
-    const candidate = db.users.find((user) => user.email.toLowerCase() === email);
-
-    // Check if account is blocked by coach
-    if (candidate?.blockedByCoach) {
-      document.querySelector("#login-error").textContent = `This account is blocked. Please contact a coach to reset your password. ${candidate.role === "Coach" ? " \n \n Since you are trying to login as a coach, you are not able to access your account. Please contact another coach (or a person who has access to the database) to reset your password." : ""}`;
+    if (!password) {
+      document.querySelector("#login-error").textContent =
+        "Enter a password, or use Email sign-in link if this Supabase user has no password.";
       return;
     }
-
-    // Check if account is in cooldown
-    if (candidate?.lockedUntil) {
-      const now = new Date().getTime();
-      if (now < candidate.lockedUntil) {
-        const remainingMinutes = Math.ceil((candidate.lockedUntil - now) / 60000);
-        if (candidate.role === "Coach") {
-          document.querySelector("#login-error").textContent = `Too many failed attempts. Try again in ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''}. \n \n Since you are trying to login as a coach, the blocked time was halved.`;
-        } else {
-          document.querySelector("#login-error").textContent = `Too many failed attempts. Try again in ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''} or contact a coach to unlock your account.`; 
-        }
+    try {
+      const user = await signInWithSupabaseAuth(email, password);
+      await loadDbFromSupabase(true);
+      await loadAuthUsersFromSupabase(true);
+      if (!user) {
+        await signOutOfSupabaseAuth();
+        document.querySelector("#login-error").textContent =
+          "Supabase Auth accepted this login, but no matching member profile exists in the app data.";
         return;
-      } else {
-        // Cooldown expired. Dont reset counter so account can get blocked.
-        candidate.lockedUntil = null;
-        candidate.lastFailedAttempt = null;
-        saveDb();
       }
-    }
-
-    // Check password
-    const passwordHash = await hashPassword(password);
-    const user = candidate && candidate.passwordHash === passwordHash ? candidate : null;
-
-    if (!user) {
-      if (candidate) {
-        candidate.failedLoginAttempts = (candidate.failedLoginAttempts || 0) + 1;
-        candidate.lastFailedAttempt = new Date().toISOString();
-
-        if (candidate.failedLoginAttempts >= PASSWORD_ATTEMPT_LIMITS.BLOCK_ATTEMPTS) {
-          candidate.blockedByCoach = true;
-          if (candidate.role === "Coach") {
-            document.querySelector("#login-error").textContent = `Account locked after ${PASSWORD_ATTEMPT_LIMITS.BLOCK_ATTEMPTS} failed attempts. \n \n Since you are trying to login as a coach, you are not able to access your account. Please contact another coach (or a person who has access to the database) to reset your password.`;
-          } else {
-            document.querySelector("#login-error").textContent = `Account blocked after ${PASSWORD_ATTEMPT_LIMITS.BLOCK_ATTEMPTS} failed attempts. Contact a coach to reset your password.`; 
-          }
-          saveDb();
-          return;
-        }
-
-        if (candidate.failedLoginAttempts >= PASSWORD_ATTEMPT_LIMITS.COOLDOWN_ATTEMPTS) {
-          let cooldownTime;
-          if (candidate.role === "Coach") {
-            cooldownTime = (PASSWORD_ATTEMPT_LIMITS.COOLDOWN_MINUTES * 60000) / 2;
-            document.querySelector("#login-error").textContent = `Too many failed attempts. Try again in ${PASSWORD_ATTEMPT_LIMITS.COOLDOWN_MINUTES / 2} minutes. \n \n Since you are trying to login as a coach, the blocked time was halved.`;
-          } else {
-            cooldownTime = PASSWORD_ATTEMPT_LIMITS.COOLDOWN_MINUTES * 60000;
-            document.querySelector("#login-error").textContent = `Too many failed attempts. Try again in ${PASSWORD_ATTEMPT_LIMITS.COOLDOWN_MINUTES} minutes or contact a coach to unlock your account.`; 
-          }
-          candidate.lockedUntil = new Date().getTime() + cooldownTime;
-          saveDb();
-          return;
-        }
-
-        saveDb();
-      }
-      document.querySelector("#login-error").textContent = "Email or password is incorrect.";
+      document.querySelector("#login-error").textContent = "";
+      showAuthState();
+      await maybeRunFirstLoginFlow();
+    } catch (error) {
+      document.querySelector("#login-error").textContent = error.message || "Email or password is incorrect.";
       return;
     }
-
-    // Successful login - reset failed attempts
-    user.failedLoginAttempts = 0;
-    user.lastFailedAttempt = null;
-    user.lockedUntil = null;
-    saveDb();
-    setSession(user);
-    document.querySelector("#login-error").textContent = "";
-    showAuthState();
   });
+
+  document.querySelector("#magic-link-login")?.addEventListener("click", async () => {
+    const email = document.querySelector("#login-email").value.trim().toLowerCase();
+    if (!email) {
+      document.querySelector("#login-error").textContent = "Enter your email first.";
+      return;
+    }
+    try {
+      await sendSupabaseMagicLink(email);
+      document.querySelector("#login-error").textContent = "Check your email for the Supabase sign-in link.";
+    } catch (error) {
+      document.querySelector("#login-error").textContent = error.message || "Could not send sign-in link.";
+    }
+  });
+}
+
+function wireBackupAccessGesture() {
+  document.addEventListener("keydown", async (event) => {
+    if (!(event.ctrlKey && event.altKey && event.shiftKey && event.key.toLowerCase() === "b")) return;
+    event.preventDefault();
+    await openBackupAccessPrompt();
+  });
+}
+
+function handlePublicEntryHash() {
+  if (window.location.hash === "#login") {
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    setTimeout(() => document.querySelector("#open-login")?.click(), 0);
+  }
+  if (window.location.hash === "#backup") {
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    setTimeout(() => openBackupAccessPrompt(), 0);
+  }
+}
+
+async function openBackupAccessPrompt() {
+  if (!document.getElementById("modal-prompt")) {
+    window.location.href = `${rootPath()}#backup`;
+    return;
+  }
+  const pin = await showPrompt("Enter the 16 digit backup PIN.", "", "Backup Access", "password");
+  if (!pin) return;
+  const normalized = String(pin).replace(/\D/g, "");
+  if (normalized.length !== 16) {
+    await showAlert("Backup PIN must be exactly 16 digits.", "Backup Access");
+    return;
+  }
+
+  try {
+    const backupPinHash = await sha256Hex(normalized);
+    const result = await callSupabaseAuthAction("verify-backup-pin", { backupPinHash });
+    if (!result.ok) throw new Error("Backup PIN was rejected.");
+    sessionStorage.setItem(BACKUP_PIN_SESSION_KEY, backupPinHash);
+    currentUser = backupAccessProfile();
+    currentView = "members";
+    document.querySelector("#public-site")?.classList.add("hidden");
+    document.querySelector("#login-screen")?.classList.add("hidden");
+    await loadAuthUsersFromSupabase(true);
+    showAuthState();
+  } catch (error) {
+    await showAlert(error.message || "Backup access failed.", "Backup Access");
+  }
+}
+
+function rootPath() {
+  const path = window.location.pathname;
+  if (path.includes("/blogs/") || path.includes("/about/")) return "../";
+  return "index.html";
+}
+
+async function maybeRunFirstLoginFlow() {
+  if (!currentUser || currentUser.backupAccess) return;
+  const seenKey = `${FIRST_LOGIN_SEEN_KEY}:${currentUser.authUserId}`;
+  if (currentUser.needsPasswordChange) {
+    await showAlert("Please set a new password before continuing.", "First Sign-In");
+    const changed = await handlePasswordChange(currentUser, true);
+    if (!changed) return;
+  }
+  if (!sessionStorage.getItem(seenKey)) {
+    sessionStorage.setItem(seenKey, "1");
+    await showAlert(
+      "Welcome. Use Dashboard for your score and messages, Presence for meeting attendance, Agenda for upcoming events, and Portfolio for project work.",
+      "Quick Walkthrough",
+    );
+  }
 }
 
 function wireChrome() {
@@ -734,15 +1000,16 @@ function wireChrome() {
     });
   });
 
-  document.querySelector("#logout")?.addEventListener("click", () => {
-    setSession(null);
+  document.querySelector("#logout")?.addEventListener("click", async () => {
+    sessionStorage.removeItem(BACKUP_PIN_SESSION_KEY);
+    await signOutOfSupabaseAuth();
     showAuthState();
   });
 
-  document.querySelector("#reset-demo")?.addEventListener("click", () => {
-    db = defaultDb();
+  document.querySelector("#reset-demo")?.addEventListener("click", async () => {
+    db = migrateDb({});
     saveDb();
-    setSession(null);
+    await signOutOfSupabaseAuth();
     showAuthState();
   });
 }
@@ -756,9 +1023,12 @@ function showAuthState() {
     if (!viewRoot || !viewTitle) return;
     document.querySelector("#user-name").textContent = currentUser.name;
     document.querySelector("#role-label").textContent =
-      currentUser.role === "Coach"
+      currentUser.backupAccess
+        ? "Backup access"
+        : currentUser.role === "Coach"
         ? "Coach access"
         : `${currentUser.role} - ${currentUser.section}${currentUser.subsection && currentUser.subsection !== "All" ? ` / ${currentUser.subsection}` : ""}`;
+    updateNavVisibility();
     render();
   } else {
     renderPublicSite();
@@ -766,12 +1036,15 @@ function showAuthState() {
   refreshIcons();
 }
 
-async function hashPassword(password) {
-  const data = new TextEncoder().encode(password);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
+function updateNavVisibility() {
+  const hideForMembers = currentUser?.role === "Member";
+  document.querySelectorAll(".nav-item").forEach((button) => {
+    const memberHiddenViews = ["members", "site"];
+    button.hidden = hideForMembers && memberHiddenViews.includes(button.dataset.view);
+  });
+  if (hideForMembers && ["members", "site"].includes(currentView)) {
+    currentView = "dashboard";
+  }
 }
 
 function refreshIcons() {
@@ -843,11 +1116,12 @@ function showConfirm(message, title = "Confirm") {
   });
 }
 
-function showPrompt(message, defaultValue = "", title = "Input") {
+function showPrompt(message, defaultValue = "", title = "Input", inputType = "text") {
   return new Promise((resolve) => {
     document.getElementById("modal-prompt-title").textContent = title;
     document.getElementById("modal-prompt-message").textContent = message;
     const input = document.getElementById("modal-prompt-input");
+    input.type = inputType;
     input.value = defaultValue;
     input.placeholder = "Enter text here...";
     showModal("modal-prompt");
@@ -864,6 +1138,7 @@ function showPrompt(message, defaultValue = "", title = "Input") {
       closeButton.removeEventListener("click", handleCancel);
       input.removeEventListener("keypress", handleKeypress);
       hideModals();
+      input.type = "text";
       resolve(result);
     };
 
@@ -881,113 +1156,60 @@ function showPrompt(message, defaultValue = "", title = "Input") {
   });
 }
 
-function showPasswordChange(title = "Change Password", requireCurrent = false) {
-  return new Promise((resolve) => {
-    document.getElementById("modal-password-title").textContent = title;
-    const messageEl = document.getElementById("modal-password-message");
-    messageEl.textContent = requireCurrent
-      ? "Enter a new password for your account."
-      : "Set a new password.";
-    
-    const newInput = document.getElementById("modal-password-new");
-    const confirmInput = document.getElementById("modal-password-confirm");
-    const currentInput = document.getElementById("modal-password-current");
-    const currentLabel = document.getElementById("modal-password-current-label");
-    
-    newInput.value = "";
-    confirmInput.value = "";
-    currentInput.value = "";
-    
-    if (requireCurrent) {
-      currentLabel.style.display = "block";
-    } else {
-      currentLabel.style.display = "none";
-    }
-
-    showModal("modal-password");
-    refreshIcons();
-    newInput.focus();
-
-    const okButton = document.getElementById("modal-password-ok");
-    const cancelButton = document.getElementById("modal-password-cancel");
-    const closeButton = document.querySelector("#modal-password .modal-close");
-    
-    const cleanup = (result) => {
-      okButton.removeEventListener("click", handleOk);
-      cancelButton.removeEventListener("click", handleCancel);
-      closeButton.removeEventListener("click", handleCancel);
-      hideModals();
-      resolve(result);
-    };
-
-    const handleOk = () => {
-      const newPassword = newInput.value;
-      const confirmPassword = confirmInput.value;
-      const currentPassword = currentInput.value;
-
-      if (!newPassword || !confirmPassword) {
-        showAlert("Please fill in all password fields.");
-        return;
-      }
-
-      if (newPassword !== confirmPassword) {
-        showAlert("Passwords do not match.");
-        return;
-      }
-
-      if (requireCurrent && !currentPassword) {
-        showAlert("Current password is required.");
-        return;
-      }
-
-      const result = {
-        newPassword,
-        currentPassword: requireCurrent ? currentPassword : null,
-      };
-
-      cleanup(result);
-    };
-
-    const handleCancel = () => cleanup(null);
-
-    okButton.addEventListener("click", handleOk);
-    cancelButton.addEventListener("click", handleCancel);
-    closeButton.addEventListener("click", handleCancel);
-    
-    // Allow Enter key to submit
-    document.addEventListener("keypress", (e) => {
-      if (e.key === "Enter" && !document.getElementById("modal-password").classList.contains("hidden")) {
-        handleOk();
-      }
-    });
-  });
-}
-
 function render() {
   if (!viewRoot || !viewTitle) return;
+  const hideMemberTabs = currentUser.role === "Member";
   document.querySelectorAll(".nav-item").forEach((button) => {
-    button.classList.toggle("active", button.dataset.view === currentView);
+    const view = button.dataset.view;
+    const visible = !(hideMemberTabs && (view === "members" || view === "meetings"));
+    button.classList.toggle("active", view === currentView);
+    button.style.display = visible ? "" : "none";
   });
-  const titles = {
-    dashboard: "Dashboard",
-    members: "Members",
-    meetings: "Presence",
-    agenda: "Agenda",
-    messages: "Messages",
-    portfolio: "Portfolio",
-    site: "Public Site",
-  };
-  viewTitle.textContent = titles[currentView];
-  const renderers = {
-    dashboard: renderDashboard,
-    members: renderMembers,
-    meetings: renderMeetings,
-    agenda: renderAgenda,
-    messages: renderMessages,
-    portfolio: renderPortfolio,
-    site: renderSiteManager,
-  };
+
+  if (hideMemberTabs && (currentView === "members" || currentView === "meetings")) {
+    currentView = "dashboard";
+  }
+
+  let renderers;
+  if (currentUser.role === "Coach" || currentUser.role === "Section Head") {
+    const titles = {
+      dashboard: "Dashboard",
+      members: "Members",
+      meetings: "Presence",
+      agenda: "Agenda",
+      messages: "Messages",
+      portfolio: "Portfolio",
+      site: "Public Site"
+    };
+    viewTitle.textContent = titles[currentView];
+    renderers = {
+      dashboard: renderDashboard,
+      members: renderMembers,
+      meetings: renderMeetings,
+      agenda: renderAgenda,
+      messages: renderMessages,
+      portfolio: renderPortfolio,
+      site: renderSiteManager,
+    };
+  } else {
+    const titles = {
+      dashboard: "Dashboard",
+      agenda: "Agenda",
+      messages: "Messages",
+      portfolio: "Portfolio",
+      site: "Public Site",
+    };
+    viewTitle.textContent = titles[currentView];
+    renderers = {
+      dashboard: renderDashboard,
+      agenda: renderAgenda,
+      messages: renderMessages,
+      portfolio: renderPortfolio,
+      site: renderSiteManager,
+    };
+  }
   renderers[currentView]();
+  renderAppAnnouncement();
   refreshIcons();
 }
 
@@ -1136,19 +1358,19 @@ function renderDashboard() {
     .sort((a, b) => new Date(a.startsAt) - new Date(b.startsAt))
     .slice(0, 4);
   const warnings = members.filter((member) => member.score < WARNING_THRESHOLD);
-  const lockedUsers = members.filter((member) => member.lockedUntil && new Date().getTime() < member.lockedUntil);
-  const blockedUsers = members.filter((member) => member.blockedByCoach);
+  const lockedUsers = [];
+  const blockedUsers = [];
 
   if (currentUser.role === "Member") {
     const user = db.users.find((member) => member.id === currentUser.id);
-    const isLocked = user?.lockedUntil && new Date().getTime() < user.lockedUntil;
-    const isBlocked = user?.blockedByCoach;
+    const isLocked = false;
+    const isBlocked = false;
     
     let warningPanel = "";
     if (isBlocked) {
       warningPanel = panel("Account Status", `<div class="warning-box blocked"><strong>⚠️ Account Blocked</strong><p>Your account has been locked due to multiple failed login attempts. Please contact a coach to unlock it.</p></div>`);
     } else if (isLocked) {
-      const remainingMinutes = Math.ceil((user.lockedUntil - new Date().getTime()) / 60000);
+      const remainingMinutes = 0;
       warningPanel = panel("Account Status", `<div class="warning-box cooldown"><strong>⏱️ Login Cooldown Active</strong><p>Your account is temporarily locked. You can try logging in again in ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''}.</p></div>`);
     }
 
@@ -1192,6 +1414,18 @@ function renderDashboard() {
 }
 
 function renderMembers() {
+  if (!authUsersLoaded) {
+    viewRoot.innerHTML = `
+      <div class="toolbar">
+        <button id="load-auth-users" class="primary-btn"><i data-lucide="refresh-cw"></i>Load Supabase users</button>
+      </div>
+      <div class="empty-state">Loading members from Supabase Auth...</div>
+    `;
+    document.querySelector("#load-auth-users")?.addEventListener("click", () => loadAuthUsersFromSupabase(true));
+    loadAuthUsersFromSupabase(false);
+    return;
+  }
+
   const members = visibleMembers();
   const editable = editableMembers();
   const filterOptions =
@@ -1207,11 +1441,6 @@ function renderMembers() {
       ${
         currentUser.role === "Coach"
           ? `<button id="add-member" class="primary-btn"><i data-lucide="user-plus"></i>Add member</button>`
-          : ""
-      }
-      ${
-        currentUser.role === "Member"
-          ? `<button id="change-own-password" class="primary-btn"><i data-lucide="key"></i>Change Password</button>`
           : ""
       }
     </div>
@@ -1232,8 +1461,9 @@ function renderMembers() {
                 </div>
                 <div class="suggestions" style="display: none;"></div>
               </div></label>
+              <label>Temporary password (optional)<input name="password" type="password" autocomplete="new-password" minlength="6" placeholder="Leave blank to generate one"></label>
               <input type="hidden" name="assignments" id="assignments-hidden">
-              <label>Temporary password<input name="password" type="password" required></label>
+              <p class="form-hint full">Optional password for the new user. Leave blank to generate a one-time temporary password on the backend.</p>
               <label>Starting score<input name="score" type="number" step="0.025" value="${START_SCORE}" required></label>
               <button class="primary-btn full" type="submit"><i data-lucide="save"></i>Create user</button>
             </form>`,
@@ -1254,9 +1484,6 @@ function renderMembers() {
   };
 
   document.querySelector("#member-section-filter")?.addEventListener("change", renderTable);
-  document.querySelector("#change-own-password")?.addEventListener("click", async () => {
-    await handlePasswordChange(currentUser, true);
-  });
   const memberForm = document.querySelector("#member-form");
   memberForm?.addEventListener("submit", handleCreateUser);
   initAssignmentsInput();
@@ -1268,8 +1495,8 @@ function renderMembersTable(members, editable) {
   const rows = members
     .map((member) => {
       const canEdit = editable.some((item) => item.id === member.id);
-      const isLocked = member.lockedUntil && new Date().getTime() < member.lockedUntil;
-      const isBlocked = member.blockedByCoach;
+      const isLocked = false;
+      const isBlocked = false;
       const statusIcon = isBlocked ? "🔒" : isLocked ? "⏱️" : "";
       const statusClass = isBlocked ? "blocked" : isLocked ? "cooldown" : "";
       return `
@@ -1287,12 +1514,7 @@ function renderMembersTable(members, editable) {
                     ${
                       currentUser.role === "Coach" && member.id !== currentUser.id
                         ? `<button class="small-btn outside-credit" data-member="${member.id}" ${hasOutsideCreditToday(member) ? "disabled" : ""}><i data-lucide="plus"></i>Outside +${OUTSIDE_MEETING_DELTA}</button>
-                          <button class="small-btn change-password" data-member="${member.id}"><i data-lucide="key"></i>Change password</button>
-                          ${
-                            (isLocked || isBlocked)
-                              ? `<button class="small-btn unlock-account" data-member="${member.id}"><i data-lucide="unlock"></i>Unlock</button>`
-                              : ""
-                          }
+                          <button class="small-btn reset-password" data-member="${member.id}"><i data-lucide="key-round"></i>Set password</button>
                           <button class="danger-btn remove-member" data-member="${member.id}"><i data-lucide="trash-2"></i>Remove</button>`
                         : ""
                     }
@@ -1332,27 +1554,6 @@ function wireMemberTable() {
     });
   });
 
-  document.querySelectorAll(".change-password").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const member = db.users.find((user) => user.id === button.dataset.member);
-      if (!member || currentUser.role !== "Coach") return;
-      await handlePasswordChange(member);
-    });
-  });
-
-  document.querySelectorAll(".unlock-account").forEach((button) => {
-    button.addEventListener("click", () => {
-      const member = db.users.find((user) => user.id === button.dataset.member);
-      if (!member || currentUser.role !== "Coach") return;
-      member.failedLoginAttempts = 0;
-      member.lastFailedAttempt = null;
-      member.lockedUntil = null;
-      member.blockedByCoach = false;
-      saveDb();
-      renderMembers();
-    });
-  });
-
   document.querySelectorAll(".activity-cell").forEach((cell) => {
     cell.addEventListener("click", () => {
       const memberId = cell.dataset.member;
@@ -1380,6 +1581,15 @@ function wireMemberTable() {
     });
   });
 
+  document.querySelectorAll(".reset-password").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (currentUser.role !== "Coach") return;
+      const member = db.users.find((user) => user.id === button.dataset.member);
+      if (!member || member.id === currentUser.id) return;
+      await handlePasswordChange(member);
+    });
+  });
+
   document.querySelectorAll(".remove-member").forEach((button) => {
     button.addEventListener("click", async () => {
       if (currentUser.role !== "Coach") return;
@@ -1390,8 +1600,15 @@ function wireMemberTable() {
         "Remove User",
       );
       if (!confirmed) return;
+      try {
+        await callSupabaseAuthAction("delete-auth-user", { profile: member });
+      } catch (error) {
+        await showAlert(error.message || "Could not remove the Supabase Auth user.", "Supabase Auth");
+        return;
+      }
       removeMember(member.id);
       saveDb();
+      await saveDbToSupabase(false);
       renderMembers();
     });
   });
@@ -1410,6 +1627,11 @@ async function handleCreateUser(event) {
     return;
   }
   const role = form.get("role");
+  const password = String(form.get("password") || "").trim();
+  if (password && password.length < 6) {
+    await showAlert("Temporary password must be at least 6 characters.", "Password Too Short");
+    return;
+  }
   const rawAssignmentsText = form.get("assignments") || "";
   const assignments = rawAssignmentsText
     .split(",")
@@ -1432,9 +1654,9 @@ async function handleCreateUser(event) {
   const score = clampScore(Number(form.get("score")));
   const user = {
     id: crypto.randomUUID(),
+    authUserId: null,
     name: form.get("name").trim(),
     email,
-    passwordHash: await hashPassword(form.get("password")),
     role,
     section: normalizedAssignments[0].section,
     subsection: normalizedAssignments[0].subsection,
@@ -1444,10 +1666,39 @@ async function handleCreateUser(event) {
     score,
     portfolio: [],
     activityLog: [],
+    needsPasswordChange: true,
   };
   user.activityLog.push(logEntry("created", `User created with score ${score}.`, 0, score, score));
-  db.users.push(user);
+
+  try {
+    const result = await callSupabaseAuthAction("create-auth-user", {
+      ...(password ? { password } : {}),
+      profile: {
+        ...user,
+        ...(password ? { password } : {}),
+      },
+    });
+    user.authUserId = result.authUserId || null;
+    if (result.authUserId) user.id = result.authUserId;
+    if (result.temporaryPassword) {
+      await showAlert(
+        `Temporary password for ${email}: ${result.temporaryPassword}\n\nGive it to the member now. It will not be shown again.`,
+        "Temporary Password",
+      );
+    } else if (password) {
+      await showAlert(
+        `User created for ${email}. The provided password has been set successfully. Share it securely with the member.`,
+        "User Created",
+      );
+    }
+  } catch (error) {
+    await showAlert(error.message || "Could not create the Supabase Auth user.", "Supabase Auth");
+    return;
+  }
+
+  db.users.push(normalizeAuthUserProfile(user));
   saveDb();
+  await loadAuthUsersFromSupabase(true);
   event.currentTarget.reset();
   renderMembers();
 }
@@ -1836,6 +2087,7 @@ function renderPortfolio() {
       authorId: currentUser.id,
     });
     member.activityLog.push(logEntry("portfolio", `Portfolio entry added: ${form.get("project")}.`, 0, member.score, member.score));
+    scheduleAuthProfileSave(member);
     saveDb();
     renderPortfolio();
   });
@@ -1874,6 +2126,21 @@ function renderSiteManager() {
         </form>`,
       )}
       ${panel(
+        "Site Banner",
+        `<form id="announcement-form" class="form-grid">
+          <label class="checkbox-label full"><input name="enabled" type="checkbox" ${db.site.announcement.enabled ? "checked" : ""}> Show banner on the public site</label>
+          <label>Type<select name="type">${["Update", "Issue", "Maintenance", "Resolved"]
+            .map(
+              (type) =>
+                `<option ${db.site.announcement.type === type ? "selected" : ""}>${type}</option>`,
+            )
+            .join("")}</select></label>
+          <label>Title<input name="title" value="${escapeHtml(db.site.announcement.title)}" placeholder="Short site update"></label>
+          <label class="full">Message<textarea name="body" placeholder="Keep it brief: technical problem, planned maintenance, or a new update.">${escapeHtml(db.site.announcement.body)}</textarea></label>
+          <button class="primary-btn full" type="submit"><i data-lucide="megaphone"></i>Save banner</button>
+        </form>`,
+      )}
+      ${panel(
         "Publish Post",
         `<form id="public-post-form" class="form-grid">
           <label>Type<select name="type">${publicPostTypes.map((type) => `<option>${type}</option>`).join("")}</select></label>
@@ -1899,6 +2166,7 @@ function renderSiteManager() {
   `;
 
   document.querySelector("#about-form").addEventListener("submit", handleSaveAbout);
+  document.querySelector("#announcement-form").addEventListener("submit", handleSaveAnnouncement);
   document.querySelector("#public-post-form").addEventListener("submit", handlePublishPost);
   document.querySelector("#supabase-sync-form")?.addEventListener("submit", handleSaveSupabaseSync);
   document.querySelector("#supabase-load-now")?.addEventListener("click", () => loadDbFromSupabase(true));
@@ -1982,7 +2250,7 @@ function renderSupabaseSyncPanel() {
       <label class="checkbox-label full"><input name="enabled" type="checkbox" ${config.enabled ? "checked" : ""}> Use Supabase as shared backend</label>
       <label class="full">Project URL<input name="url" value="${escapeHtml(config.url)}" placeholder="https://your-project.supabase.co"></label>
       <label class="full">Anon key<input name="anonKey" type="password" placeholder="${config.anonKey ? "Anon key configured" : "Supabase anon public key"}"></label>
-      <label>Table<input name="table" value="${escapeHtml(config.table)}" placeholder="app_state"></label>
+      <label>Edge function<input name="functionName" value="${escapeHtml(config.functionName)}" placeholder="app-state"></label>
       <label>State row id<input name="stateId" value="${escapeHtml(config.stateId)}" placeholder="main"></label>
       <p class="form-hint full">${hasShippedConfig ? "This site ships with the Supabase URL and public anon key, so every device uses the same backend." : "Add the Supabase URL and public anon key to supabase-config.js to ship them with the site."}</p>
       <button class="primary-btn" type="submit"><i data-lucide="save"></i>Save backend settings</button>
@@ -2003,6 +2271,7 @@ function getSupabaseSyncConfig() {
     url: String(SHIPPED_SUPABASE_CONFIG.url || "").replace(/\/+$/, ""),
     anonKey: String(SHIPPED_SUPABASE_CONFIG.anonKey || ""),
     table: String(SHIPPED_SUPABASE_CONFIG.table || "app_state"),
+    functionName: String(SHIPPED_SUPABASE_CONFIG.functionName || "app-state"),
     stateId: String(SHIPPED_SUPABASE_CONFIG.stateId || SUPABASE_STATE_ID),
     status: "",
   };
@@ -2018,6 +2287,7 @@ function getSupabaseSyncConfig() {
       url: String(stored.url || fallback.url).replace(/\/+$/, ""),
       anonKey: String(stored.anonKey || fallback.anonKey),
       table: String(stored.table || fallback.table),
+      functionName: String(stored.functionName || fallback.functionName),
       stateId: String(stored.stateId || fallback.stateId),
       status: String(stored.status || fallback.status),
     };
@@ -2041,12 +2311,16 @@ function handleSaveSupabaseSync(event) {
     url: String(form.get("url") || "").trim().replace(/\/+$/, "") || existing.url,
     anonKey,
     table: String(form.get("table") || "").trim() || existing.table || "app_state",
+    functionName: String(form.get("functionName") || "").trim() || existing.functionName || "app-state",
     stateId: String(form.get("stateId") || "").trim() || existing.stateId || SUPABASE_STATE_ID,
     status: anonKey ? "Supabase backend settings saved." : "Supabase settings saved, but no anon key is configured.",
   };
   setSupabaseSyncConfig(config);
+  supabaseClient = null;
   renderSiteManager();
-  if (config.enabled && config.url && anonKey) loadDbFromSupabase(true);
+  if (config.enabled && config.url && anonKey) {
+    initSupabaseAuth().then(() => loadDbFromSupabase(true));
+  }
 }
 
 function getGitSyncConfig() {
@@ -2096,6 +2370,7 @@ function handleSaveAbout(event) {
   const labels = form.getAll("socialLabel").map((value) => value.trim());
   const urls = form.getAll("socialUrl").map((value) => normalizeUrl(value));
   db.site = {
+    ...db.site,
     aboutTitle: form.get("aboutTitle").trim(),
     aboutBody: form.get("aboutBody").trim(),
     socials: labels
@@ -2104,6 +2379,28 @@ function handleSaveAbout(event) {
   };
   saveDb();
   renderPublicSite();
+  renderSiteManager();
+}
+
+function handleSaveAnnouncement(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const enabled = form.get("enabled") === "on";
+  const title = String(form.get("title") || "").trim();
+  const body = String(form.get("body") || "").trim();
+  db.site = {
+    ...db.site,
+    announcement: {
+      enabled: enabled && Boolean(title || body),
+      type: String(form.get("type") || "Update"),
+      title,
+      body,
+      updatedAt: new Date().toISOString(),
+    },
+  };
+  saveDb();
+  renderPublicSite();
+  renderAppAnnouncement();
   renderSiteManager();
 }
 
@@ -2156,14 +2453,16 @@ function renderPostManagerList() {
 }
 
 function renderPublicSite() {
+  const announcement = document.querySelector("#public-announcement");
   const aboutSummary = document.querySelector("#public-about-summary");
   const socialLinks = document.querySelector("#public-social-links");
   const about = document.querySelector("#public-about");
   const posts = document.querySelector("#public-posts");
   const aboutPageTitle = document.querySelector("#about-page-title");
   const blogArticle = document.querySelector("#blog-article");
-  if (!aboutSummary && !socialLinks && !about && !posts && !aboutPageTitle && !blogArticle) return;
+  if (!announcement && !aboutSummary && !socialLinks && !about && !posts && !aboutPageTitle && !blogArticle) return;
 
+  if (announcement) renderAnnouncementBanner(announcement);
   if (aboutPageTitle) aboutPageTitle.textContent = db.site.aboutTitle;
   if (aboutSummary) aboutSummary.textContent = db.site.aboutBody;
   if (socialLinks) {
@@ -2189,6 +2488,49 @@ function renderPublicSite() {
   if (blogArticle) {
     blogArticle.innerHTML = renderBlogArticle();
   }
+}
+
+function renderAnnouncementBanner(container) {
+  const announcement = db.site.announcement || {};
+  const hasMessage = Boolean(String(announcement.title || announcement.body || "").trim());
+  const isApp = container.id === "app-announcement";
+  container.className = isApp ? "public-announcement app-announcement hidden" : "public-announcement hidden";
+  container.innerHTML = "";
+  if (!announcement.enabled || !hasMessage) return;
+
+  const dismissId = announcement.updatedAt || `${announcement.type}:${announcement.title}:${announcement.body}`;
+  const dismissKey = `announcement-dismissed:${container.id}:${dismissId}`;
+  if (sessionStorage.getItem(dismissKey)) return;
+
+  const type = String(announcement.type || "Update");
+  const normalizedType = type.toLowerCase();
+
+  container.classList.remove("hidden");
+  container.classList.add(`public-announcement-${normalizedType}`);
+  container.innerHTML = `
+    <div class="announcement-content">
+      <div class="announcement-left">
+        <span class="announcement-type">${escapeHtml(type)}</span>
+      </div>
+      <div class="announcement-main">
+        ${announcement.title ? `<strong>${escapeHtml(announcement.title)}</strong>` : ""}
+        ${announcement.body ? `<p>${escapeHtml(announcement.body)}</p>` : ""}
+      </div>
+      <button type="button" class="announcement-close" aria-label="Dismiss announcement">&times;</button>
+    </div>
+  `;
+
+  const closeButton = container.querySelector(".announcement-close");
+  closeButton?.addEventListener("click", () => {
+    sessionStorage.setItem(dismissKey, "1");
+    container.classList.add("hidden");
+  });
+}
+
+function renderAppAnnouncement() {
+  const announcement = document.querySelector("#app-announcement");
+  if (!announcement) return;
+  renderAnnouncementBanner(announcement);
 }
 
 function renderPublicPostsPage(grouped = false) {
@@ -2314,6 +2656,7 @@ function changeScore(member, delta, note, options = {}) {
     options,
   );
   member.activityLog.push(entry);
+  scheduleAuthProfileSave(member);
   return entry;
 }
 
@@ -2488,8 +2831,8 @@ async function loadDbFromSupabase(manual = false) {
   supabaseRemoteBusy = true;
   updateSupabaseStatus("Loading data from Supabase...");
   try {
-    const response = await fetch(supabaseRowUrl(config), {
-      headers: supabaseHeaders(config.anonKey),
+    const response = await fetch(`${supabaseFunctionUrl(config)}?id=${encodeURIComponent(config.stateId)}`, {
+      headers: supabaseHeaders(),
     });
     if (response.status === 404) {
       updateSupabaseStatus("No Supabase row found yet. Use Save to Supabase once.");
@@ -2497,16 +2840,23 @@ async function loadDbFromSupabase(manual = false) {
       return;
     }
     if (!response.ok) throw new Error(`Supabase load failed: ${response.status}`);
-    const rows = await response.json();
-    if (!rows.length) {
-      updateSupabaseStatus("No Supabase data found yet. Use Save to Supabase once.");
+    const payload = await response.json();
+    if (!payload.data) {
+      db.users = Array.isArray(payload.users) ? payload.users.map(normalizeAuthUserProfile) : [];
+      authUsersLoaded = Boolean(db.users.length);
       supabaseInitialLoadDone = true;
+      updateSupabaseStatus(
+        payload.usersError
+          ? `Loaded app data, but Supabase Auth users could not be loaded: ${payload.usersError}`
+          : "No Supabase data found yet. Use Save to Supabase once.",
+      );
       return;
     }
-    const newDb = migrateDb(rows[0].data);
+    const newDb = migrateDb(payload.data);
+    newDb.users = Array.isArray(payload.users) ? payload.users.map(normalizeAuthUserProfile) : db.users;
+    authUsersLoaded = Array.isArray(payload.users) && !payload.usersError;
     const dbChanged = JSON.stringify(db) !== JSON.stringify(newDb);
     db = newDb;
-    saveDbLocalOnly();
     currentUser = getSessionUser();
     // Only re-render if data actually changed or this is a manual load
     if (manual || dbChanged) {
@@ -2514,7 +2864,11 @@ async function loadDbFromSupabase(manual = false) {
       if (currentUser && viewRoot && viewTitle) render();
     }
     supabaseInitialLoadDone = true;
-    updateSupabaseStatus(`Loaded from Supabase ${formatDate(new Date().toISOString())}.`);
+    updateSupabaseStatus(
+      payload.usersError
+        ? `Loaded app data, but Supabase Auth users could not be loaded: ${payload.usersError}`
+        : `Loaded from Supabase ${formatDate(new Date().toISOString())}.`,
+    );
   } catch (error) {
     supabaseInitialLoadDone = true;
     updateSupabaseStatus(error.message || "Supabase load failed.");
@@ -2538,16 +2892,16 @@ async function saveDbToSupabase(manual = false) {
   supabaseRemoteBusy = true;
   updateSupabaseStatus("Saving data to Supabase...");
   try {
-    const response = await fetch(supabaseTableUrl(config), {
+    const response = await fetch(supabaseFunctionUrl(config), {
       method: "POST",
       headers: {
-        ...supabaseHeaders(config.anonKey),
-        Prefer: "resolution=merge-duplicates,return=minimal",
+        ...supabaseHeaders(),
+        "x-state-id": config.stateId,
+        ...(hasBackupAccess() ? { "x-backup-pin-hash": getBackupPinHash() } : {}),
       },
       body: JSON.stringify({
-        id: config.stateId,
-        data: db,
-        updated_at: new Date().toISOString(),
+        data: appStateForSupabaseSave(),
+        ...(hasBackupAccess() ? { backupPinHash: getBackupPinHash() } : {}),
       }),
     });
     if (!response.ok) throw new Error(`Supabase save failed: ${response.status}`);
@@ -2562,25 +2916,28 @@ async function saveDbToSupabase(manual = false) {
 }
 
 function saveDbLocalOnly() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+  // App state is remote-first; users come from Supabase Auth and are not cached locally.
+}
+
+function appStateForSupabaseSave() {
+  const { users: _users, ...state } = db;
+  return state;
 }
 
 function isSupabaseConfigured(config) {
-  return Boolean(config.url && config.anonKey && config.table && config.stateId);
+  return Boolean(config.url && config.anonKey && config.functionName && config.stateId);
 }
 
-function supabaseTableUrl(config) {
-  return `${config.url}/rest/v1/${encodeURIComponent(config.table)}?on_conflict=id`;
+function supabaseFunctionUrl(config) {
+  return `${config.url}/functions/v1/${encodeURIComponent(config.functionName)}`;
 }
 
-function supabaseRowUrl(config) {
-  return `${config.url}/rest/v1/${encodeURIComponent(config.table)}?id=eq.${encodeURIComponent(config.stateId)}&select=data`;
-}
-
-function supabaseHeaders(anonKey) {
+function supabaseHeaders(accessToken = null) {
+  const config = getSupabaseSyncConfig();
+  const token = accessToken || getAuthSession()?.access_token || config.anonKey;
   return {
-    apikey: anonKey,
-    Authorization: `Bearer ${anonKey}`,
+    apikey: config.anonKey,
+    Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
   };
 }
@@ -2630,7 +2987,7 @@ async function syncDbToGitHub(manual = false) {
       headers: githubHeaders(config.token),
       body: JSON.stringify({
         message: `Autosave app data ${new Date().toISOString()}`,
-        content: base64Encode(JSON.stringify(db, null, 2)),
+        content: base64Encode(JSON.stringify(appStateForSupabaseSave(), null, 2)),
         branch: config.branch,
         ...(sha ? { sha } : {}),
       }),
@@ -2708,51 +3065,81 @@ function escapeHtml(value) {
 }
 
 async function handlePasswordChange(member, isOwnPassword = false) {
-  const canChange = isOwnPassword || (currentUser.role === "Coach" && member.id !== currentUser.id);
-  if (!canChange) return;
+  if (!member) return false;
+  if (!isOwnPassword && currentUser.role !== "Coach") return false;
 
-  const isBlocked = member.blockedByCoach;
-  const isLocked = member.lockedUntil && new Date().getTime() < member.lockedUntil;
-
-  const result = await showPasswordChange(
-    isOwnPassword ? "Change Your Password" : `Set Password for ${member.name}`,
-    isOwnPassword
+  const password = await showPrompt(
+    `Set a new temporary password for ${member.email}. It must be at least 6 characters.`,
+    "",
+    "Set Password",
+    "password",
   );
-
-  if (!result) return;
-
-  const { newPassword, currentPassword } = result;
-
-  // Verify current password if required
-  if (isOwnPassword) {
-    const currentHash = await hashPassword(currentPassword);
-    if (currentHash !== member.passwordHash) {
-      await showAlert("Current password is incorrect.", "Invalid Password");
-      return;
-    }
+  if (!password) return false;
+  if (password.length < 6) {
+    await showAlert("Temporary password must be at least 6 characters.", "Password Too Short");
+    return false;
   }
 
-  // Update password
-  const newHash = await hashPassword(newPassword);
-  member.passwordHash = newHash;
-  member.failedLoginAttempts = 0;
-  member.lastFailedAttempt = null;
-  member.lockedUntil = null;
-  member.blockedByCoach = false;
+  try {
+    if (isOwnPassword) {
+      await updateOwnSupabasePassword(member, password);
+      await signInWithSupabaseAuth(member.email, password);
+      member.needsPasswordChange = false;
+      member.activityLog.push(
+        logEntry("password", "Password changed on first sign-in.", 0, member.score, member.score),
+      );
+      await loadDbFromSupabase(true);
+      await loadAuthUsersFromSupabase(true);
+      currentUser = getSessionUser();
+      showAuthState();
+      await showAlert("Your password has been updated.", "Password Updated");
+      return true;
+    }
 
-  saveDb();
-
-  const statusMessage = isLocked || isBlocked ? " Account has been unlocked." : "";
-  await showAlert(
-    `Password${isOwnPassword ? "" : ` for ${member.name}`} has been updated successfully.${statusMessage}`,
-    "Password Updated"
-  );
-
-  if (isOwnPassword) {
-    // Re-render without re-authenticating
-    currentUser = db.users.find((u) => u.id === currentUser.id);
-    render();
-  } else {
-    renderMembers();
+    const profileForPasswordChange = {
+      ...member,
+      needsPasswordChange: !isOwnPassword,
+    };
+    const result = await callSupabaseAuthAction("set-auth-password", {
+      profile: profileForPasswordChange,
+      password,
+    });
+    if (result.authUserId && member.authUserId !== result.authUserId) {
+      member.authUserId = result.authUserId;
+      member.id = result.authUserId;
+    }
+    member.needsPasswordChange = !isOwnPassword;
+    member.activityLog.push(
+      logEntry(
+        "password",
+        isOwnPassword ? "Password changed on first sign-in." : "Temporary Supabase password was reset by a coach.",
+        0,
+        member.score,
+        member.score,
+      ),
+    );
+    saveDb();
+    if (isOwnPassword) {
+      await signInWithSupabaseAuth(member.email, password);
+      await loadDbFromSupabase(true);
+      await loadAuthUsersFromSupabase(true);
+      currentUser = getSessionUser();
+      showAuthState();
+    } else {
+      await loadAuthUsersFromSupabase(true);
+      if (currentView === "members") renderMembers();
+    }
+    await showAlert(
+      result.created
+        ? `Supabase Auth user created and temporary password set for ${member.email}.`
+        : isOwnPassword
+        ? "Your password has been updated."
+        : `Temporary password updated for ${member.email}.`,
+      result.created ? "Auth User Created" : "Password Updated",
+    );
+    return true;
+  } catch (error) {
+    await showAlert(error.message || "Could not update the Supabase password.", "Supabase Auth");
+    return false;
   }
 }
