@@ -118,6 +118,14 @@ button {
   min-width: 0;
 }
 
+.announcement-instance {
+  margin-bottom: 12px;
+}
+
+.announcement-instance:last-child {
+  margin-bottom: 0;
+}
+
 .public-announcement-issue .announcement-content {
   background: linear-gradient(90deg, #d94c51, #f05d5f);
 }
@@ -147,6 +155,44 @@ button {
   font-weight: 900;
   text-transform: uppercase;
   letter-spacing: 0.06em;
+}
+
+.announcement-list {
+  display: grid;
+  gap: 14px;
+}
+
+.announcement-row {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 14px;
+  background: var(--panel);
+}
+
+.announcement-row-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.announcement-row-title {
+  margin: 0;
+  font-weight: 800;
+}
+
+.announcement-editor-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.announcement-editor-header p {
+  margin: 0;
 }
 
 .public-announcement strong {

@@ -410,13 +410,16 @@ const defaultDb = () => {
       aboutTitle: "About JTeChmasters",
       aboutBody:
         "JTeChmasters is an FTC robotics team building robots, software, media, outreach projects, and match-day confidence together.",
-      announcement: {
-        enabled: false,
-        type: "Update",
-        title: "",
-        body: "",
-        updatedAt: "",
-      },
+      announcements: [
+        {
+          id: crypto.randomUUID(),
+          enabled: false,
+          type: "Update",
+          title: "",
+          body: "",
+          updatedAt: "",
+        },
+      ],
       socials: [
         { label: "Instagram", url: "https://www.instagram.com/" },
         { label: "FIRST FTC", url: "https://www.firstinspires.org/robotics/ftc" },
@@ -477,14 +480,25 @@ function migrateDb(source) {
     next.site.socials = fresh.site.socials;
     changed = true;
   }
-  if (!next.site.announcement || typeof next.site.announcement !== "object") {
-    next.site.announcement = fresh.site.announcement;
+  if (!Array.isArray(next.site.announcements)) {
+    if (next.site.announcement && typeof next.site.announcement === "object") {
+      next.site.announcements = [
+        {
+          ...fresh.site.announcements[0],
+          ...next.site.announcement,
+          id: String(next.site.announcement.id || crypto.randomUUID()),
+        },
+      ];
+    } else {
+      next.site.announcements = fresh.site.announcements;
+    }
     changed = true;
   } else {
-    next.site.announcement = {
-      ...fresh.site.announcement,
-      ...next.site.announcement,
-    };
+    next.site.announcements = next.site.announcements.map((announcement) => ({
+      ...fresh.site.announcements[0],
+      ...announcement,
+      id: String(announcement.id || crypto.randomUUID()),
+    }));
   }
   if (!next.site.aboutTitle) {
     next.site.aboutTitle = fresh.site.aboutTitle;
@@ -2128,16 +2142,16 @@ function renderSiteManager() {
       ${panel(
         "Site Banner",
         `<form id="announcement-form" class="form-grid">
-          <label class="checkbox-label full"><input name="enabled" type="checkbox" ${db.site.announcement.enabled ? "checked" : ""}> Show banner on the public site</label>
-          <label>Type<select name="type">${["Update", "Issue", "Maintenance", "Resolved"]
-            .map(
-              (type) =>
-                `<option ${db.site.announcement.type === type ? "selected" : ""}>${type}</option>`,
-            )
-            .join("")}</select></label>
-          <label>Title<input name="title" value="${escapeHtml(db.site.announcement.title)}" placeholder="Short site update"></label>
-          <label class="full">Message<textarea name="body" placeholder="Keep it brief: technical problem, planned maintenance, or a new update.">${escapeHtml(db.site.announcement.body)}</textarea></label>
-          <button class="primary-btn full" type="submit"><i data-lucide="megaphone"></i>Save banner</button>
+          <div class="announcement-editor-header">
+            <p class="muted">Create multiple banner messages for the public site.</p>
+            <button id="add-announcement" type="button" class="secondary-btn full"><i data-lucide="plus"></i>Add banner</button>
+          </div>
+          <div id="announcement-list" class="announcement-list">
+            ${db.site.announcements
+              .map((announcement, index) => renderAnnouncementRow(announcement, index))
+              .join("")}
+          </div>
+          <button class="primary-btn full" type="submit"><i data-lucide="megaphone"></i>Save banners</button>
         </form>`,
       )}
       ${panel(
@@ -2167,6 +2181,10 @@ function renderSiteManager() {
 
   document.querySelector("#about-form").addEventListener("submit", handleSaveAbout);
   document.querySelector("#announcement-form").addEventListener("submit", handleSaveAnnouncement);
+  document.querySelector("#add-announcement")?.addEventListener("click", addAnnouncementRow);
+  document.querySelectorAll(".remove-announcement").forEach((button) => {
+    button.addEventListener("click", removeAnnouncementRow);
+  });
   document.querySelector("#public-post-form").addEventListener("submit", handlePublishPost);
   document.querySelector("#supabase-sync-form")?.addEventListener("submit", handleSaveSupabaseSync);
   document.querySelector("#supabase-load-now")?.addEventListener("click", () => loadDbFromSupabase(true));
@@ -2203,6 +2221,27 @@ function renderSiteManager() {
     await showAlert(`Removed ${removedCount} old activity log entries.`, "Data Cleanup Complete");
     renderSiteManager();
   });
+}
+
+function renderAnnouncementRow(announcement, index) {
+  const rowId = escapeHtml(String(announcement.id || `new-${index}`));
+  return `
+    <fieldset class="announcement-row" data-row-id="${rowId}" data-updated-at="${escapeHtml(announcement.updatedAt || "")}">
+      <div class="announcement-row-header">
+        <p class="announcement-row-title">Banner ${index + 1}</p>
+        <button type="button" class="ghost-btn remove-announcement" aria-label="Remove banner">Remove</button>
+      </div>
+      <label class="checkbox-label full"><input class="announcement-enabled" name="enabled-${rowId}" type="checkbox" ${announcement.enabled ? "checked" : ""}> Enabled</label>
+      <label>Type<select class="announcement-type" name="type-${rowId}">${["Update", "Issue", "Maintenance", "Resolved"]
+        .map(
+          (type) =>
+            `<option ${announcement.type === type ? "selected" : ""}>${type}</option>`,
+        )
+        .join("")}</select></label>
+      <label>Title<input class="announcement-title" name="title-${rowId}" value="${escapeHtml(announcement.title)}" placeholder="Short site update"></label>
+      <label class="full">Message<textarea class="announcement-body" name="body-${rowId}" placeholder="Keep it brief: technical problem, planned maintenance, or a new update.">${escapeHtml(announcement.body)}</textarea></label>
+    </fieldset>
+  `;
 }
 
 function renderSocialInputs(socials) {
@@ -2384,24 +2423,59 @@ function handleSaveAbout(event) {
 
 function handleSaveAnnouncement(event) {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
-  const enabled = form.get("enabled") === "on";
-  const title = String(form.get("title") || "").trim();
-  const body = String(form.get("body") || "").trim();
+  const rows = Array.from(document.querySelectorAll(".announcement-row"));
+  const announcements = rows
+    .map((row) => {
+      const enabled = row.querySelector(".announcement-enabled")?.checked;
+      const type = String(row.querySelector(".announcement-type")?.value || "Update");
+      const title = String(row.querySelector(".announcement-title")?.value || "").trim();
+      const body = String(row.querySelector(".announcement-body")?.value || "").trim();
+      const id = String(row.dataset.rowId || crypto.randomUUID());
+      const updatedAt = new Date().toISOString();
+      return {
+        id,
+        enabled: Boolean(enabled),
+        type,
+        title,
+        body,
+        updatedAt,
+      };
+    })
+    .filter((announcement) => announcement.enabled || announcement.title || announcement.body);
+
   db.site = {
     ...db.site,
-    announcement: {
-      enabled: enabled && Boolean(title || body),
-      type: String(form.get("type") || "Update"),
-      title,
-      body,
-      updatedAt: new Date().toISOString(),
-    },
+    announcements,
   };
   saveDb();
   renderPublicSite();
   renderAppAnnouncement();
   renderSiteManager();
+}
+
+function addAnnouncementRow() {
+  const list = document.querySelector("#announcement-list");
+  if (!list) return;
+  const rowCount = list.querySelectorAll(".announcement-row").length;
+  const newRow = document.createElement("div");
+  newRow.innerHTML = renderAnnouncementRow({
+    id: `new-${rowCount}`,
+    enabled: false,
+    type: "Update",
+    title: "",
+    body: "",
+    updatedAt: "",
+  }, rowCount);
+  const fieldset = newRow.firstElementChild;
+  if (fieldset) {
+    list.appendChild(fieldset);
+    fieldset.querySelector(".remove-announcement")?.addEventListener("click", removeAnnouncementRow);
+  }
+}
+
+function removeAnnouncementRow(event) {
+  const row = event.currentTarget.closest(".announcement-row");
+  row?.remove();
 }
 
 function handlePublishPost(event) {
@@ -2462,7 +2536,7 @@ function renderPublicSite() {
   const blogArticle = document.querySelector("#blog-article");
   if (!announcement && !aboutSummary && !socialLinks && !about && !posts && !aboutPageTitle && !blogArticle) return;
 
-  if (announcement) renderAnnouncementBanner(announcement);
+  if (announcement) renderAnnouncementsBanner(announcement);
   if (aboutPageTitle) aboutPageTitle.textContent = db.site.aboutTitle;
   if (aboutSummary) aboutSummary.textContent = db.site.aboutBody;
   if (socialLinks) {
@@ -2490,47 +2564,63 @@ function renderPublicSite() {
   }
 }
 
-function renderAnnouncementBanner(container) {
-  const announcement = db.site.announcement || {};
-  const hasMessage = Boolean(String(announcement.title || announcement.body || "").trim());
+function renderAnnouncementsBanner(container) {
+  const announcements = Array.isArray(db.site.announcements) ? db.site.announcements : [];
+  const visibleAnnouncements = announcements.filter(
+    (announcement) =>
+      announcement.enabled &&
+      Boolean(String(announcement.title || announcement.body || "").trim()),
+  );
+
   const isApp = container.id === "app-announcement";
   container.className = isApp ? "public-announcement app-announcement hidden" : "public-announcement hidden";
   container.innerHTML = "";
-  if (!announcement.enabled || !hasMessage) return;
-
-  const dismissId = announcement.updatedAt || `${announcement.type}:${announcement.title}:${announcement.body}`;
-  const dismissKey = `announcement-dismissed:${container.id}:${dismissId}`;
-  if (sessionStorage.getItem(dismissKey)) return;
-
-  const type = String(announcement.type || "Update");
-  const normalizedType = type.toLowerCase();
+  if (!visibleAnnouncements.length) return;
 
   container.classList.remove("hidden");
-  container.classList.add(`public-announcement-${normalizedType}`);
-  container.innerHTML = `
-    <div class="announcement-content">
-      <div class="announcement-left">
-        <span class="announcement-type">${escapeHtml(type)}</span>
-      </div>
-      <div class="announcement-main">
-        ${announcement.title ? `<strong>${escapeHtml(announcement.title)}</strong>` : ""}
-        ${announcement.body ? `<p>${escapeHtml(announcement.body)}</p>` : ""}
-      </div>
-      <button type="button" class="announcement-close" aria-label="Dismiss announcement">&times;</button>
-    </div>
-  `;
+  container.innerHTML = visibleAnnouncements
+    .map((announcement, index) => {
+      const type = String(announcement.type || "Update");
+      const normalizedType = type.toLowerCase();
+      const id = announcement.id || announcement.updatedAt || `${type}:${announcement.title}:${announcement.body}:${index}`;
+      const dismissKey = `announcement-dismissed:${container.id}:${id}`;
+      if (sessionStorage.getItem(dismissKey)) return "";
 
-  const closeButton = container.querySelector(".announcement-close");
-  closeButton?.addEventListener("click", () => {
-    sessionStorage.setItem(dismissKey, "1");
-    container.classList.add("hidden");
+      return `
+        <div class="announcement-instance public-announcement-${normalizedType}" data-announcement-id="${escapeHtml(
+          id,
+        )}">
+          <div class="announcement-content">
+            <div class="announcement-left">
+              <span class="announcement-type">${escapeHtml(type)}</span>
+            </div>
+            <div class="announcement-main">
+              ${announcement.title ? `<strong>${escapeHtml(announcement.title)}</strong>` : ""}
+              ${announcement.body ? `<p>${escapeHtml(announcement.body)}</p>` : ""}
+            </div>
+            <button type="button" class="announcement-close" aria-label="Dismiss announcement">&times;</button>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  container.querySelectorAll(".announcement-close").forEach((button) => {
+    button.addEventListener("click", () => {
+      const instance = button.closest(".announcement-instance");
+      const announcementId = instance?.dataset.announcementId;
+      if (announcementId) {
+        sessionStorage.setItem(`announcement-dismissed:${container.id}:${announcementId}`, "1");
+      }
+      instance?.classList.add("hidden");
+    });
   });
 }
 
 function renderAppAnnouncement() {
   const announcement = document.querySelector("#app-announcement");
   if (!announcement) return;
-  renderAnnouncementBanner(announcement);
+  renderAnnouncementsBanner(announcement);
 }
 
 function renderPublicPostsPage(grouped = false) {
