@@ -125,6 +125,11 @@ function initAssignmentsInput() {
   let currentSection = null;
   let currentMode = "section"; // "section" or "subsection"
 
+  if (input === null || suggestions === null || selectedContainer === null || currentSectionLabel === null || hiddenInput === null) { 
+    showAlert("Could not initialize assignments input due to missing elements.", "Initialization Error");
+    return;
+  }
+
   function updateHiddenInput() {
     hiddenInput.value = selectedAssignments
       .map((assignment) => `${assignment.section || "All"} / ${assignment.subsection || "All"}`)
@@ -1438,7 +1443,7 @@ function renderMembers() {
     document.querySelector("#load-auth-users")?.addEventListener("click", () => loadAuthUsersFromSupabase(true));
     loadAuthUsersFromSupabase(false);
     return;
-  }
+  } 
 
   const members = visibleMembers();
   const editable = editableMembers();
@@ -1448,7 +1453,9 @@ function renderMembers() {
           .map((section) => `<option value="${section}">${section}</option>`)
           .join("")}</select></label>`
       : "";
-
+  if (currentUser.role === "Section Head") {
+    const mySections = userAssignments(currentUser).map((assignment) => assignment.section);
+  }
   viewRoot.innerHTML = `
     <div class="toolbar">
       ${filterOptions}
@@ -1485,7 +1492,7 @@ function renderMembers() {
         : ""
     }
   `;
-
+  
   const renderTable = () => {
     const selected = document.querySelector("#member-section-filter")?.value || "All";
     const filtered =
@@ -1500,7 +1507,7 @@ function renderMembers() {
   document.querySelector("#member-section-filter")?.addEventListener("change", renderTable);
   const memberForm = document.querySelector("#member-form");
   memberForm?.addEventListener("submit", handleCreateUser);
-  initAssignmentsInput();
+  if (currentUser.role === "Coach") initAssignmentsInput();
   renderTable();
 }
 
