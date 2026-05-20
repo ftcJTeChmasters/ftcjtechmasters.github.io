@@ -11,6 +11,7 @@ const SHIPPED_SUPABASE_CONFIG =
 const DB_SAVE_RATE_LIMIT_MS = 500;
 const SUPABASE_REFRESH_INTERVAL_MS = 30000; // kept for compatibility but auto-refresh disabled
 const SUPABASE_PING_INTERVAL_MS = 1000;
+const SUPABASE_MAIN_SCREEN_PING_INTERVAL_MS = 60000;
 const SUPABASE_PING_TIMEOUT_MS = 2000;
 const SUPABASE_RECONNECT_INTERVAL_MS = 5000;
 let supabasePingTimer = null;
@@ -589,11 +590,22 @@ function startSupabasePing() {
   scheduleSupabasePing(0);
 }
 
+function getSupabasePingInterval() {
+  if (currentView === "dashboard") {
+    return SUPABASE_MAIN_SCREEN_PING_INTERVAL_MS;
+  }
+  return SUPABASE_PING_INTERVAL_MS;
+}
+
 function scheduleSupabasePing(delay) {
   const config = getSupabaseSyncConfig();
   if (!config.enabled || !config.url || !config.anonKey) return;
   clearTimeout(supabasePingTimer);
-  const interval = typeof delay === "number" ? delay : supabaseLocked ? SUPABASE_RECONNECT_INTERVAL_MS : SUPABASE_PING_INTERVAL_MS;
+  const interval = typeof delay === "number"
+    ? delay
+    : supabaseLocked
+    ? SUPABASE_RECONNECT_INTERVAL_MS
+    : getSupabasePingInterval();
   supabasePingTimer = setTimeout(() => pingSupabaseServer(), interval);
 }
 
@@ -754,6 +766,11 @@ function backupAccessProfile() {
 }
 
 async function signInWithSupabaseAuth(email, password) {
+  const authGate = await callSupabaseAuthAction("authenticate-user", { email, password });
+  if (!authGate?.ok) {
+    throw new Error(authGate?.error || "Email or password is incorrect.");
+  }
+
   const client = getSupabaseClient();
   if (!client) {
     throw new Error("Supabase is not configured yet. Add the URL and anon key to supabase-config.js.");
@@ -765,6 +782,33 @@ async function signInWithSupabaseAuth(email, password) {
   if (error) throw new Error(error.message || "Email or password is incorrect.");
   currentAuthSession = data.session || null;
   return getSessionUser();
+}
+
+async function checkLoginStatus(email) {
+  if (!email) return null;
+  try {
+    return await callSupabaseAuthAction("check-login-status", { email });
+  } catch (error) {
+    return null;
+  }
+}
+
+async function notifyLoginFailure(email) {
+  if (!email) return null;
+  try {
+    return await callSupabaseAuthAction("notify-wrong-password", { email });
+  } catch (error) {
+    return { error: error.message };
+  }
+}
+
+async function resetLoginAttempts(email) {
+  if (!email) return null;
+  try {
+    return await callSupabaseAuthAction("reset-login-attempts", { email });
+  } catch (error) {
+    return null;
+  }
 }
 
 async function sendSupabaseMagicLink(email) {
@@ -786,7 +830,7 @@ async function callSupabaseAuthAction(action, body) {
   if (!isSupabaseConfigured(config)) {
     throw new Error("Supabase is not configured yet. Add the URL and anon key to supabase-config.js.");
   }
-  if (!getAuthSession()?.access_token && action !== "verify-backup-pin") {
+  if (!getAuthSession()?.access_token && !["authenticate-user", "verify-backup-pin", "check-login-status", "notify-wrong-password", "reset-login-attempts", "unblock-auth-user"].includes(action)) {
     if (!hasBackupAccess()) {
       throw new Error("Sign in again before changing Supabase Auth users.");
     }
@@ -851,6 +895,14 @@ function normalizeAuthUserProfile(user) {
     portfolio: Array.isArray(user.portfolio) ? user.portfolio : [],
     activityLog: Array.isArray(user.activityLog) ? user.activityLog : [],
     needsPasswordChange: Boolean(user.needsPasswordChange),
+    invalidPasswordAttempts: Number(user.invalidPasswordAttempts ?? 0),
+    lockoutCount: Number(user.lockoutCount ?? 0),
+    lockoutUntil: user.lockoutUntil ? String(user.lockoutUntil) : null,
+    blocked: Boolean(user.blocked),
+    maxInvalidAttempts: Number(user.maxInvalidAttempts ?? 3),
+    maxLockouts: Number(user.maxLockouts ?? 3),
+    lockoutDurationMinutes: Number(user.lockoutDurationMinutes ?? 10),
+    coachLockoutDurationMinutes: Number(user.coachLockoutDurationMinutes ?? 5),
   };
 }
 
@@ -876,6 +928,14 @@ function authMetadataFromProfile(user) {
     portfolio: Array.isArray(user.portfolio) ? user.portfolio : [],
     activityLog: Array.isArray(user.activityLog) ? user.activityLog : [],
     needsPasswordChange: Boolean(user.needsPasswordChange),
+    invalidPasswordAttempts: Number(user.invalidPasswordAttempts ?? 0),
+    lockoutCount: Number(user.lockoutCount ?? 0),
+    lockoutUntil: user.lockoutUntil ?? null,
+    blocked: Boolean(user.blocked),
+    maxInvalidAttempts: Number(user.maxInvalidAttempts ?? 3),
+    maxLockouts: Number(user.maxLockouts ?? 3),
+    lockoutDurationMinutes: Number(user.lockoutDurationMinutes ?? 10),
+    coachLockoutDurationMinutes: Number(user.coachLockoutDurationMinutes ?? 5),
   };
 }
 
@@ -1002,7 +1062,22 @@ function wireLogin() {
     document.querySelector("#login-error").textContent = "";
 
     try {
+      const status = await checkLoginStatus(email);
+      if (status?.blocked) {
+        document.querySelector("#login-error").textContent =
+          status.message || "Your account is blocked until a coach unlocks it.";
+        return;
+      }
+      if (status?.locked) {
+        const lockoutUntil = status.lockoutUntil ? new Date(status.lockoutUntil) : null;
+        const remainingMinutes = lockoutUntil ? Math.max(1, Math.ceil((lockoutUntil - new Date()) / 60000)) : 0;
+        document.querySelector("#login-error").textContent =
+          status.message || `Too many failed login attempts. Try again in ${remainingMinutes} minute${remainingMinutes !== 1 ? "s" : ""}.`;
+        return;
+      }
+
       const user = await signInWithSupabaseAuth(email, password);
+      await resetLoginAttempts(email);
       await loadDbFromSupabase(true);
       await loadAuthUsersFromSupabase(true);
       if (!user) {
@@ -1014,7 +1089,11 @@ function wireLogin() {
       showAuthState();
       await maybeRunFirstLoginFlow();
     } catch (error) {
-      document.querySelector("#login-error").textContent = error.message || "Email or password is incorrect.";
+      const defaultMessage = error.message || "Email or password is incorrect.";
+      const isLockError = /blocked|locked/i.test(defaultMessage);
+      const result = isLockError ? null : await notifyLoginFailure(email);
+      document.querySelector("#login-error").textContent =
+        result?.message || result?.error || defaultMessage;
     } finally {
       setLoginButtonLoading(false);
     }
@@ -1465,19 +1544,20 @@ function renderDashboard() {
     .sort((a, b) => new Date(a.startsAt) - new Date(b.startsAt))
     .slice(0, 4);
   const warnings = members.filter((member) => member.score < WARNING_THRESHOLD);
-  const lockedUsers = [];
-  const blockedUsers = [];
+  const lockedUsers = members.filter((member) => member.lockoutUntil && new Date(member.lockoutUntil) > new Date());
+  const blockedUsers = members.filter((member) => Boolean(member.blocked));
 
   if (currentUser.role === "Member") {
     const user = db.users.find((member) => member.id === currentUser.id);
-    const isLocked = false;
-    const isBlocked = false;
-    
+    const lockoutUntil = user?.lockoutUntil ? new Date(user.lockoutUntil) : null;
+    const isLocked = lockoutUntil ? lockoutUntil > new Date() : false;
+    const isBlocked = Boolean(user?.blocked);
+
     let warningPanel = "";
     if (isBlocked) {
       warningPanel = panel("Account Status", `<div class="warning-box blocked"><strong>⚠️ Account Blocked</strong><p>Your account has been locked due to multiple failed login attempts. Please contact a coach to unlock it.</p></div>`);
     } else if (isLocked) {
-      const remainingMinutes = 0;
+      const remainingMinutes = Math.max(1, Math.ceil((lockoutUntil - new Date()) / 60000));
       warningPanel = panel("Account Status", `<div class="warning-box cooldown"><strong>⏱️ Login Cooldown Active</strong><p>Your account is temporarily locked. You can try logging in again in ${remainingMinutes} minute${remainingMinutes !== 1 ? 's' : ''}.</p></div>`);
     }
 
@@ -1535,6 +1615,8 @@ function renderMembers() {
 
   const members = visibleMembers();
   const editable = editableMembers();
+  const lockedUsers = members.filter((member) => member.lockoutUntil && new Date(member.lockoutUntil) > new Date());
+  const blockedUsers = members.filter((member) => Boolean(member.blocked));
   const filterOptions =
     currentUser.role === "Coach"
       ? `<label>Section<select id="member-section-filter"><option value="All">All sections</option>${sections
@@ -1604,10 +1686,15 @@ function renderMembersTable(members, editable) {
   const rows = members
     .map((member) => {
       const canEdit = editable.some((item) => item.id === member.id);
-      const isLocked = false;
-      const isBlocked = false;
+      const lockoutUntil = member.lockoutUntil ? new Date(member.lockoutUntil) : null;
+      const isLocked = lockoutUntil ? lockoutUntil > new Date() : false;
+      const isBlocked = Boolean(member.blocked);
       const statusIcon = isBlocked ? "🔒" : isLocked ? "⏱️" : "";
       const statusClass = isBlocked ? "blocked" : isLocked ? "cooldown" : "";
+      const unlockButton =
+        currentUser.role === "Coach" && (isBlocked || isLocked) && member.id !== currentUser.id
+          ? `<button class="small-btn unlock-member" data-member="${member.id}"><i data-lucide="unlock"></i>Unlock</button>`
+          : "";
       return `
         <tr class="${statusClass}">
           <td><strong>${escapeHtml(member.name)}</strong><br><span class="muted">${escapeHtml(member.email)}</span>${statusIcon ? ` <span class="status-icon">${statusIcon}</span>` : ""}</td>
@@ -1624,6 +1711,7 @@ function renderMembersTable(members, editable) {
                       currentUser.role === "Coach" && member.id !== currentUser.id
                         ? `<button class="small-btn outside-credit" data-member="${member.id}" ${hasOutsideCreditToday(member) ? "disabled" : ""}><i data-lucide="plus"></i>Outside +${OUTSIDE_MEETING_DELTA}</button>
                           <button class="small-btn reset-password" data-member="${member.id}"><i data-lucide="key-round"></i>Set password</button>
+                          ${unlockButton}
                           <button class="danger-btn remove-member" data-member="${member.id}"><i data-lucide="trash-2"></i>Remove</button>`
                         : ""
                     }
@@ -1696,6 +1784,21 @@ function wireMemberTable() {
       const member = db.users.find((user) => user.id === button.dataset.member);
       if (!member || member.id === currentUser.id) return;
       await handlePasswordChange(member);
+    });
+  });
+
+  document.querySelectorAll(".unlock-member").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (currentUser.role !== "Coach") return;
+      const member = db.users.find((user) => user.id === button.dataset.member);
+      if (!member || member.id === currentUser.id) return;
+      try {
+        await callSupabaseAuthAction("unblock-auth-user", { profile: member });
+        await loadAuthUsersFromSupabase(true);
+        renderMembers();
+      } catch (error) {
+        await showAlert(error.message || "Could not unlock this user.", "Unlock User");
+      }
     });
   });
 

@@ -55,6 +55,22 @@ function json(body: unknown, status = 200) {
   });
 }
 
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object") {
+    if (typeof (error as { message?: unknown }).message === "string") {
+      return String((error as { message?: unknown }).message);
+    }
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
+  }
+  return "";
+}
+
 function bearerToken(request: Request) {
   const header = request.headers.get("authorization") || "";
   const [scheme, token] = header.split(" ");
@@ -190,17 +206,100 @@ function canManageProfiles(profile: unknown) {
   );
 }
 
-function metadataFromProfile(profile: Record<string, unknown>) {
+function metadataFromProfile(profile: Record<string, unknown>, existingMetadata: Record<string, unknown> = {}) {
   return {
-    name: String(profile.name || ""),
-    role: String(profile.role || "Member"),
-    section: String(profile.section || "All"),
-    subsection: String(profile.subsection || "All"),
-    assignments: Array.isArray(profile.assignments) ? profile.assignments : [],
-    score: Number(profile.score ?? 0),
-    portfolio: Array.isArray(profile.portfolio) ? profile.portfolio : [],
-    activityLog: Array.isArray(profile.activityLog) ? profile.activityLog : [],
-    needsPasswordChange: Boolean(profile.needsPasswordChange),
+    ...existingMetadata,
+    name: String(profile.name || existingMetadata.name || ""),
+    role: String(profile.role || existingMetadata.role || "Member"),
+    section: String(profile.section || existingMetadata.section || "All"),
+    subsection: String(profile.subsection || existingMetadata.subsection || "All"),
+    assignments: Array.isArray(profile.assignments)
+      ? profile.assignments
+      : Array.isArray(existingMetadata.assignments)
+      ? existingMetadata.assignments
+      : [{ section: String(profile.section || existingMetadata.section || "All"), subsection: String(profile.subsection || existingMetadata.subsection || "All") }],
+    score: Number(profile.score ?? existingMetadata.score ?? 0),
+    portfolio: Array.isArray(profile.portfolio)
+      ? profile.portfolio
+      : Array.isArray(existingMetadata.portfolio)
+      ? existingMetadata.portfolio
+      : [],
+    activityLog: Array.isArray(profile.activityLog)
+      ? profile.activityLog
+      : Array.isArray(existingMetadata.activityLog)
+      ? existingMetadata.activityLog
+      : [],
+    needsPasswordChange: Boolean(profile.needsPasswordChange ?? existingMetadata.needsPasswordChange),
+    invalidPasswordAttempts: Number(profile.invalidPasswordAttempts ?? existingMetadata.invalidPasswordAttempts ?? 0),
+    lockoutCount: Number(profile.lockoutCount ?? existingMetadata.lockoutCount ?? 0),
+    lockoutUntil: profile.lockoutUntil ?? existingMetadata.lockoutUntil ?? null,
+    blocked: Boolean(profile.blocked ?? existingMetadata.blocked ?? false),
+    maxInvalidAttempts: Number(profile.maxInvalidAttempts ?? existingMetadata.maxInvalidAttempts ?? 3),
+    maxLockouts: Number(profile.maxLockouts ?? existingMetadata.maxLockouts ?? 3),
+    lockoutDurationMinutes: Number(profile.lockoutDurationMinutes ?? existingMetadata.lockoutDurationMinutes ?? 10),
+    coachLockoutDurationMinutes: Number(profile.coachLockoutDurationMinutes ?? existingMetadata.coachLockoutDurationMinutes ?? 5),
+  };
+}
+
+async function getAuthUserMetadata(authUserId: string) {
+  const { data, error } = await admin.auth.admin.getUserById(authUserId);
+  if (error || !data.user) throw new Error(getErrorMessage(error) || "Auth user not found.");
+  return (data.user.user_metadata || {}) as Record<string, unknown>;
+}
+
+async function findAuthUserByEmail(email: string) {
+  const normalized = String(email || "").trim().toLowerCase();
+  if (!normalized) return null;
+
+  const listResult = await (admin.auth.admin as any).listUsers({ query: normalized, perPage: 100 });
+  if (listResult.error) throw new Error(getErrorMessage(listResult.error));
+
+  const users = Array.isArray(listResult.data)
+    ? listResult.data
+    : Array.isArray(listResult.data?.users)
+    ? listResult.data.users
+    : [];
+
+  const authUser = users.find(
+    (user: { email?: string }) => String(user.email || "").trim().toLowerCase() === normalized,
+  );
+
+  if (!authUser) return null;
+  return {
+    id: String(authUser.id || ""),
+    email: String(authUser.email || ""),
+    raw_user_meta_data:
+      (authUser as { raw_user_meta_data?: Record<string, unknown> }).raw_user_meta_data ||
+      (authUser as { user_metadata?: Record<string, unknown> }).user_metadata || {},
+  };
+}
+
+function isLoginLocked(metadata: Record<string, unknown>) {
+  const lockoutUntil = metadata.lockoutUntil;
+  if (!lockoutUntil) return false;
+  const lockoutDate = new Date(String(lockoutUntil));
+  return lockoutDate > new Date();
+}
+
+function getLockoutStatus(metadata: Record<string, unknown>) {
+  const invalidPasswordAttempts = Number(metadata.invalidPasswordAttempts ?? 0);
+  const lockoutCount = Number(metadata.lockoutCount ?? 0);
+  const maxInvalidAttempts = Number(metadata.maxInvalidAttempts ?? 3);
+  const maxLockouts = Number(metadata.maxLockouts ?? 3);
+  const lockoutDurationMinutes = Number(metadata.lockoutDurationMinutes ?? 10);
+  const coachLockoutDurationMinutes = Number(metadata.coachLockoutDurationMinutes ?? 5);
+  const lockoutUntil = metadata.lockoutUntil ? new Date(String(metadata.lockoutUntil)) : null;
+  const blocked = Boolean(metadata.blocked ?? false);
+  return {
+    invalidPasswordAttempts,
+    lockoutCount,
+    maxInvalidAttempts,
+    maxLockouts,
+    lockoutDurationMinutes,
+    coachLockoutDurationMinutes,
+    lockoutUntil,
+    blocked,
+    locked: lockoutUntil instanceof Date && lockoutUntil > new Date(),
   };
 }
 
@@ -212,7 +311,7 @@ function stripUsersFromState(stateData: unknown) {
 
 async function listAuthProfiles(): Promise<AuthProfile[]> {
   const { data, error } = await admin.rpc("list_auth_profiles");
-  if (error) throw error;
+  if (error) throw new Error(getErrorMessage(error));
   return Array.isArray(data) ? data as AuthProfile[] : [];
 }
 
@@ -282,13 +381,12 @@ async function setAuthUserPassword(profile: Record<string, unknown>, password: s
     return { ...updated, created: true };
   }
 
+  const existingMetadata = await getAuthUserMetadata(authUserId);
   const { data, error } = await admin.auth.admin.updateUserById(authUserId, {
     email,
     password: cleanPassword,
     email_confirm: true,
-    user_metadata: {
-      ...metadataFromProfile(profile),
-    },
+    user_metadata: metadataFromProfile(profile, existingMetadata),
   });
   if (error) return { error: friendlyAuthError(error.message) };
   return { user: data.user };
@@ -299,11 +397,10 @@ async function updateAuthUserProfile(profile: Record<string, unknown>): Promise<
   const email = String(profile.email || "").trim().toLowerCase();
   if (!authUserId) return { error: "Auth user id is required." };
 
+  const existingMetadata = await getAuthUserMetadata(authUserId);
   const { data, error } = await admin.auth.admin.updateUserById(authUserId, {
     ...(email ? { email } : {}),
-    user_metadata: {
-      ...metadataFromProfile(profile),
-    },
+    user_metadata: metadataFromProfile(profile, existingMetadata),
   });
   if (error) return { error: friendlyAuthError(error.message) };
   return { user: data.user };
@@ -359,17 +456,112 @@ async function handleRequest(request: Request) {
     if (!payload || typeof payload !== "object") {
       return json({ error: "Request body must be an object." }, 400);
     }
+    const action = (payload as { action?: unknown }).action;
+    const anonymousActions = [
+      "authenticate-user",
+      "check-login-status",
+      "notify-wrong-password",
+      "reset-login-attempts",
+    ];
     const actor = await requestActor(request, payload as Record<string, unknown>);
-    if (!actor) return json({ error: "Authentication required." }, 401);
-    const profile = actor.profile;
+    if (!actor && !anonymousActions.includes(String(action || ""))) {
+      return json({ error: "Authentication required." }, 401);
+    }
+    const profile = actor?.profile;
 
     if (!("data" in payload)) {
-      const action = (payload as { action?: unknown }).action;
       if (!action) return json({ error: "Request body must include a data property." }, 400);
 
       if (action === "verify-backup-pin") {
-        if (!actor.backup) return json({ error: "Backup PIN is incorrect." }, 403);
+        if (!actor?.backup) return json({ error: "Backup PIN is incorrect." }, 403);
         return json({ ok: true, profile: backupProfile() });
+      }
+
+      if (action === "authenticate-user") {
+        const email = String((payload as { email?: unknown }).email || "").trim().toLowerCase();
+        if (!email) return json({ error: "Email is required." }, 400);
+        const authUser = await findAuthUserByEmail(email);
+        if (!authUser) {
+          return json({ error: "Email or password is incorrect." }, 400);
+        }
+        const metadata = authUser.raw_user_meta_data || {};
+        const status = getLockoutStatus(metadata);
+        if (status.blocked) {
+          return json({ error: "This account is blocked. Contact a coach to unlock it.", blocked: true }, 403);
+        }
+        if (status.locked) {
+          return json({ error: "This account is temporarily locked.", locked: true, lockoutUntil: status.lockoutUntil }, 403);
+        }
+        return json({ ok: true });
+      }
+
+      if (action === "check-login-status") {
+        const email = String((payload as { email?: unknown }).email || "").trim().toLowerCase();
+        if (!email) return json({ error: "Email is required." }, 400);
+        const authUser = await findAuthUserByEmail(email);
+        if (!authUser) return json({ ok: true, found: false });
+        const metadata = authUser.raw_user_meta_data || {};
+        const status = getLockoutStatus(metadata);
+        return json({ ok: true, found: true, email, role: String(metadata.role || "Member"), ...status });
+      }
+
+      if (action === "notify-wrong-password") {
+        const email = String((payload as { email?: unknown }).email || "").trim().toLowerCase();
+        if (!email) return json({ error: "Email is required." }, 400);
+        const authUser = await findAuthUserByEmail(email);
+        if (!authUser) return json({ error: "Auth user not found." }, 404);
+        const metadata = authUser.raw_user_meta_data || {};
+        const status = getLockoutStatus(metadata);
+        if (status.blocked) {
+          return json({ error: "This account is blocked. Contact a coach to unlock it.", blocked: true }, 403);
+        }
+        if (status.locked) {
+          return json({ error: "This account is temporarily locked.", locked: true, lockoutUntil: status.lockoutUntil }, 403);
+        }
+        const attempted = status.invalidPasswordAttempts + 1;
+        const remaining = Math.max(0, status.maxInvalidAttempts - attempted);
+        const isCoachAccount = String(metadata.role || "Member") === "Coach";
+        const lockoutMinutes = isCoachAccount ? status.coachLockoutDurationMinutes : status.lockoutDurationMinutes;
+        const updatedMetadata = { ...metadata, invalidPasswordAttempts: attempted } as Record<string, unknown>;
+        let message = `Email or password is incorrect. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining.`;
+
+        if (attempted >= status.maxInvalidAttempts) {
+          updatedMetadata.invalidPasswordAttempts = 0;
+          updatedMetadata.lockoutCount = status.lockoutCount + 1;
+          updatedMetadata.lockoutUntil = new Date(Date.now() + lockoutMinutes * 60000).toISOString();
+          if (updatedMetadata.lockoutCount >= status.maxLockouts) {
+            updatedMetadata.blocked = true;
+            message = `Too many failed login attempts. This account is blocked until a coach unlocks it.`;
+          } else {
+            message = `Too many failed login attempts. This account is locked for ${lockoutMinutes} minute${lockoutMinutes !== 1 ? "s" : ""}.`;
+          }
+        }
+
+        const mergedMetadata = metadataFromProfile({}, updatedMetadata);
+        const { error } = await admin.auth.admin.updateUserById(authUser.id, {
+          user_metadata: mergedMetadata,
+        });
+        if (error) return json({ error: friendlyAuthError(error.message) }, 500);
+        return json({ ok: true, message, blocked: Boolean(mergedMetadata.blocked), locked: isLoginLocked(mergedMetadata), lockoutUntil: mergedMetadata.lockoutUntil });
+      }
+
+      if (action === "reset-login-attempts") {
+        const email = String((payload as { email?: unknown }).email || "").trim().toLowerCase();
+        if (!email) return json({ error: "Email is required." }, 400);
+        const authUser = await findAuthUserByEmail(email);
+        if (!authUser) return json({ error: "Auth user not found." }, 404);
+        const metadata = authUser.raw_user_meta_data || {};
+        const updatedMetadata = {
+          ...metadata,
+          invalidPasswordAttempts: 0,
+          lockoutUntil: null,
+        } as Record<string, unknown>;
+        const mergedMetadata = metadataFromProfile({}, updatedMetadata);
+        const { error } = await admin.auth.admin.updateUserById(authUser.id, {
+          user_metadata: mergedMetadata,
+        });
+        if (error) return json({ error: friendlyAuthError(error.message) }, 500);
+        return json({ ok: true });
       }
 
       const actionProfile = (payload as { profile?: unknown }).profile;
@@ -433,6 +625,39 @@ async function handleRequest(request: Request) {
         return json({ ok: true, authUserId });
       }
 
+      if (action === "reset-login-attempts") {
+        const email = String((payload as { email?: unknown }).email || "").trim().toLowerCase();
+        if (!email) return json({ error: "Email is required." }, 400);
+        const authUser = await findAuthUserByEmail(email);
+        if (!authUser) return json({ error: "Auth user not found." }, 404);
+        const metadata = authUser.raw_user_meta_data || {};
+        const updatedMetadata = {
+          ...metadata,
+          invalidPasswordAttempts: 0,
+          lockoutUntil: null,
+        } as Record<string, unknown>;
+        const mergedMetadata = metadataFromProfile({}, updatedMetadata);
+        const { error } = await admin.auth.admin.updateUserById(authUser.id, {
+          user_metadata: mergedMetadata,
+        });
+        if (error) return json({ error: friendlyAuthError(error.message) }, 500);
+        return json({ ok: true });
+      }
+
+      if (action === "unblock-auth-user") {
+        if (!isCoach(profile)) return json({ error: "Coach access required." }, 403);
+        const targetProfile = actionProfile as Record<string, unknown>;
+        const authUserId = String(targetProfile.authUserId || targetProfile.id || "");
+        if (!authUserId) return json({ error: "Auth user id is required." }, 400);
+        const existingMetadata = await getAuthUserMetadata(authUserId);
+        const mergedMetadata = metadataFromProfile({ ...existingMetadata, blocked: false, invalidPasswordAttempts: 0, lockoutUntil: null, lockoutCount: 0 }, existingMetadata);
+        const { error } = await admin.auth.admin.updateUserById(authUserId, {
+          user_metadata: mergedMetadata,
+        });
+        if (error) return json({ error: friendlyAuthError(error.message) }, 500);
+        return json({ ok: true, authUserId });
+      }
+
       return json({ error: "Unknown action." }, 400);
     }
 
@@ -458,7 +683,7 @@ Deno.serve(async (request) => {
   try {
     return await handleRequest(request);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unexpected Supabase Edge Function error.";
+    const message = getErrorMessage(error) || "Unexpected Supabase Edge Function error.";
     return json({ error: message }, 500);
   }
 });
