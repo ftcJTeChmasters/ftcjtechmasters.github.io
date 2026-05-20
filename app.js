@@ -811,20 +811,6 @@ async function resetLoginAttempts(email) {
   }
 }
 
-async function sendSupabaseMagicLink(email) {
-  const client = getSupabaseClient();
-  if (!client) {
-    throw new Error("Supabase is not configured yet. Add the URL and anon key to supabase-config.js.");
-  }
-  const { error } = await client.auth.signInWithOtp({
-    email,
-    options: {
-      emailRedirectTo: window.location.origin + window.location.pathname,
-    },
-  });
-  if (error) throw new Error(error.message || "Could not send sign-in link.");
-}
-
 async function callSupabaseAuthAction(action, body) {
   const config = getSupabaseSyncConfig();
   if (!isSupabaseConfigured(config)) {
@@ -1096,20 +1082,6 @@ function wireLogin() {
         result?.message || result?.error || defaultMessage;
     } finally {
       setLoginButtonLoading(false);
-    }
-  });
-
-  document.querySelector("#magic-link-login")?.addEventListener("click", async () => {
-    const email = document.querySelector("#login-email").value.trim().toLowerCase();
-    if (!email) {
-      document.querySelector("#login-error").textContent = "Enter your email first.";
-      return;
-    }
-    try {
-      await sendSupabaseMagicLink(email);
-      document.querySelector("#login-error").textContent = "Check your email for the Supabase sign-in link.";
-    } catch (error) {
-      document.querySelector("#login-error").textContent = error.message || "Could not send sign-in link.";
     }
   });
 }
