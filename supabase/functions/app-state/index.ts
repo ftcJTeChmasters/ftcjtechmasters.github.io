@@ -330,6 +330,15 @@ async function handleRequest(request: Request) {
       return json(authPayload);
     }
 
+    if (resource === "ping") {
+      const lastUpdatedAt = url.searchParams.get("lastUpdatedAt") || null;
+      const { data, error } = await loadState(stateId);
+      if (error) return json({ error: error.message }, 500);
+      const updatedAt = data?.updated_at || null;
+      const ping = updatedAt === lastUpdatedAt ? 1 : 2;
+      return json({ ping, updatedAt });
+    }
+
     const { data, error } = await loadState(stateId);
 
     if (error) return json({ error: error.message }, 500);

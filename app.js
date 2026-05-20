@@ -9,7 +9,13 @@ const FIRST_LOGIN_SEEN_KEY = "robotics-attendance-first-login-walkthrough";
 const SHIPPED_SUPABASE_CONFIG =
   typeof window !== "undefined" && window.JTECHMASTERS_SUPABASE ? window.JTECHMASTERS_SUPABASE : {};
 const DB_SAVE_RATE_LIMIT_MS = 500;
-const SUPABASE_REFRESH_INTERVAL_MS = 30000;
+const SUPABASE_REFRESH_INTERVAL_MS = 30000; // kept for compatibility but auto-refresh disabled
+const SUPABASE_PING_INTERVAL_MS = 1000;
+const SUPABASE_PING_TIMEOUT_MS = 2000;
+const SUPABASE_RECONNECT_INTERVAL_MS = 5000;
+let supabasePingTimer = null;
+let supabaseLocked = false; // true when offline/locked and trying slower reconnects
+let supabaseLastKnownUpdatedAt = null;
 let dbSaveTimer = null;
 let authUsersLoaded = false;
 const MAX_SCORE = 7;
@@ -327,103 +333,16 @@ const seedUsers = [
 ];
 
 const defaultDb = () => {
-  const now = new Date();
-  const tomorrow = new Date(now);
-  tomorrow.setDate(now.getDate() + 1);
-  tomorrow.setHours(18, 30, 0, 0);
-  const weekend = new Date(now);
-  weekend.setDate(now.getDate() + 4);
-  weekend.setHours(10, 0, 0, 0);
-
   return {
     users: [],
-    meetings: [
-      {
-        id: crypto.randomUUID(),
-        title: "Engineering Drivebase Review",
-        startsAt: tomorrow.toISOString(),
-        scope: "Engineering",
-        subsection: "Programming",
-        createdBy: "u-eng-head",
-        attendance: {},
-        applied: false,
-        reversed: false,
-        scoreChanges: [],
-      },
-      {
-        id: crypto.randomUUID(),
-        title: "Full Team Scrimmage Prep",
-        startsAt: weekend.toISOString(),
-        scope: "Global",
-        subsection: "All",
-        createdBy: "u-coach",
-        attendance: {},
-        applied: false,
-        reversed: false,
-        scoreChanges: [],
-      },
-    ],
-    messages: [
-      {
-        id: crypto.randomUUID(),
-        fromId: "u-coach",
-        toId: "u-alex",
-        audience: { type: "user", userId: "u-alex" },
-        at: now.toISOString(),
-        body: "Bring the latest CAD notes to the next engineering review.",
-        read: false,
-      },
-    ],
-    publicPosts: [
-      {
-        id: crypto.randomUUID(),
-        type: "Update",
-        title: "Season planning is underway",
-        body: "Engineering, media, and outreach are preparing their first sprint goals for the new FTC season.",
-        url: "",
-        urlLabel: "",
-        authorId: "u-coach",
-        publishedAt: now.toISOString(),
-      },
-      {
-        id: crypto.randomUUID(),
-        type: "Link",
-        title: "Follow us on Instagram",
-        body: "Match clips, pit photos, and workshop snapshots will be shared through our team socials.",
-        url: "https://www.instagram.com/",
-        urlLabel: "Open Instagram",
-        authorId: "u-media-head",
-        publishedAt: now.toISOString(),
-      },
-      {
-        id: crypto.randomUUID(),
-        type: "Blog",
-        title: DEFAULT_LONG_BLOG_TITLE,
-        body: DEFAULT_LONG_BLOG_BODY,
-        url: "",
-        urlLabel: "",
-        authorId: "u-eng-head",
-        publishedAt: now.toISOString(),
-      },
-    ],
+    meetings: [],
+    messages: [],
+    publicPosts: [],
     site: {
-      aboutTitle: "About JTeChmasters",
-      aboutBody:
-        "JTeChmasters is an FTC robotics team building robots, software, media, outreach projects, and match-day confidence together.",
-      announcements: [
-        {
-          id: crypto.randomUUID(),
-          enabled: false,
-          type: "Update",
-          title: "",
-          body: "",
-          updatedAt: "",
-        },
-      ],
-      socials: [
-        { label: "Instagram", url: "https://www.instagram.com/" },
-        { label: "FIRST FTC", url: "https://www.firstinspires.org/robotics/ftc" },
-      ],
+      aboutTitle: "",
+      aboutBody:"",
+      announcements: [],
+      socials: [],
     },
   };
 };
@@ -461,6 +380,7 @@ function loadDb() {
     const parsed = raw ? JSON.parse(raw) : {};
     return migrateDb(parsed);
   } catch {
+    showAlert("An error occurred while loading the database.", "Load error");
     return migrateDb({});
   }
 }
@@ -622,6 +542,160 @@ function getSupabaseClient() {
   return supabaseClient;
 }
 
+async function safeFetch(input, init, timeout = 0) {
+  if (typeof navigator !== "undefined" && !navigator.onLine) {
+    throw new Error("Internet connection appears to be offline.");
+  }
+
+  let controller;
+  let timer;
+  const requestInit = { ...init };
+  if (timeout) {
+    controller = new AbortController();
+    timer = setTimeout(() => controller.abort(), timeout);
+    requestInit.signal = controller.signal;
+  }
+
+  try {
+    return await fetch(input, requestInit);
+  } catch (error) {
+    if (timer) clearTimeout(timer);
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      throw new Error("Internet connection appears to be offline.");
+    }
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("No response from server during the network ping.");
+    }
+    throw new Error(error?.message || "Network request failed.");
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function stopSupabasePing() {
+  clearTimeout(supabasePingTimer);
+  supabasePingTimer = null;
+}
+
+function startSupabasePing() {
+  supabaseLocked = false;
+  if (supabasePingTimer) return;
+  removeSyncOverlay();
+  scheduleSupabasePing(0);
+}
+
+function scheduleSupabasePing(delay) {
+  const config = getSupabaseSyncConfig();
+  if (!config.enabled || !config.url || !config.anonKey) return;
+  clearTimeout(supabasePingTimer);
+  const interval = typeof delay === "number" ? delay : supabaseLocked ? SUPABASE_RECONNECT_INTERVAL_MS : SUPABASE_PING_INTERVAL_MS;
+  supabasePingTimer = setTimeout(() => pingSupabaseServer(), interval);
+}
+
+function createSyncOverlay() {
+  if (document.getElementById("sync-overlay")) return;
+  const overlay = document.createElement("div");
+  overlay.id = "sync-overlay";
+  Object.assign(overlay.style, {
+    position: "fixed",
+    inset: "0",
+    background: "rgba(0,0,0,0.6)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: "99999",
+    color: "#fff",
+    pointerEvents: "auto",
+  });
+
+  const box = document.createElement("div");
+  Object.assign(box.style, {
+    background: "#222",
+    padding: "24px",
+    borderRadius: "8px",
+    maxWidth: "90%",
+    textAlign: "center",
+    boxShadow: "0 8px 32px rgba(0,0,0,0.6)",
+  });
+  box.innerHTML = `
+    <div style="font-size:18px; margin-bottom:12px;">Connection lost</div>
+    <div style="margin-bottom:12px;">Trying to reconnect&hellip;</div>
+    <div class="spinner" style="width:28px;height:28px;margin:0 auto;border:4px solid rgba(255,255,255,0.15);border-top-color:#fff;border-radius:50%;animation:spin 1s linear infinite"></div>
+    <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+  `;
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+}
+
+function showSyncOverlay(message) {
+  createSyncOverlay();
+  const box = document.querySelector("#sync-overlay div");
+  if (box && message) box.childNodes[1] && (box.childNodes[1].textContent = message);
+}
+
+function removeSyncOverlay() {
+  const el = document.getElementById("sync-overlay");
+  if (el) el.remove();
+}
+
+async function pingSupabaseServer() {
+  const config = getSupabaseSyncConfig();
+  if (!config.enabled || !config.url || !config.anonKey) return;
+
+  try {
+    const params = new URLSearchParams({ resource: "ping", id: config.stateId });
+    if (supabaseLastKnownUpdatedAt) {
+      params.set("lastUpdatedAt", supabaseLastKnownUpdatedAt);
+    }
+
+    const response = await safeFetch(
+      `${supabaseFunctionUrl(config)}?${params.toString()}`,
+      { headers: supabaseHeaders() },
+      SUPABASE_PING_TIMEOUT_MS,
+    );
+
+    if (!response.ok) {
+      throw new Error(`Supabase ping failed: ${response.status}`);
+    }
+
+    const payload = await response.json();
+    if (payload.ping === 2) {
+      supabaseLastKnownUpdatedAt = payload.updatedAt || supabaseLastKnownUpdatedAt;
+      // if we were locked, remove lock and perform full load
+      if (supabaseLocked) {
+        supabaseLocked = false;
+        removeSyncOverlay();
+        updateSupabaseStatus("Reconnected. Loading updates...");
+      }
+      await loadDbFromSupabase(false);
+      scheduleSupabasePing();
+      return;
+    }
+
+    if (payload.updatedAt) {
+      supabaseLastKnownUpdatedAt = payload.updatedAt;
+    }
+    // if previously locked, clear lock and restore UI
+    if (supabaseLocked) {
+      supabaseLocked = false;
+      removeSyncOverlay();
+      updateSupabaseStatus("Reconnected.");
+    }
+    updateSupabaseStatus(`Supabase ping OK ${formatDate(new Date().toISOString())}.`);
+    scheduleSupabasePing();
+  } catch (error) {
+    // enter locked state but keep attempting reconnects at a slower interval
+    supabaseLocked = true;
+    updateSupabaseStatus(error.message || "Supabase ping failed. Attempting to reconnect...");
+    try {
+      showSyncOverlay(error?.message || "Connection lost. Trying to reconnect...");
+    } catch (e) {
+      // ignore overlay errors
+    }
+    scheduleSupabasePing(SUPABASE_RECONNECT_INTERVAL_MS);
+  }
+}
+
 async function initSupabaseAuth() {
   const client = getSupabaseClient();
   if (!client) return;
@@ -715,7 +789,7 @@ async function callSupabaseAuthAction(action, body) {
 
   let response;
   try {
-    response = await fetch(supabaseFunctionUrl(config), {
+    response = await safeFetch(supabaseFunctionUrl(config), {
       method: "POST",
       headers: {
         ...supabaseHeaders(),
@@ -731,14 +805,14 @@ async function callSupabaseAuthAction(action, body) {
   } catch (error) {
     const detail = error?.message ? ` (${error.message})` : "";
     throw new Error(
-      `Could not reach the Supabase Edge Function "${config.functionName}". Refresh the page after deploying the latest function and check that CORS/preflight succeeds.${detail}`,
+      `Could not reach the Supabase Edge Function "${config.functionName}". Refresh the page after deploying the latest function and check that CORS/preflight succeeds.${detail}`
     );
   }
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (response.status === 404) {
       throw new Error(
-        `Supabase could not find the Edge Function "${config.functionName}" at ${supabaseFunctionUrl(config)}. Deploy it to project jpfipvcwxwaxehgmjlne or update supabase-config.js to the deployed function name.`,
+        `Supabase could not find the Edge Function "${config.functionName}" at ${supabaseFunctionUrl(config)}. Deploy it to project jpfipvcwxwaxehgmjlne or update supabase-config.js to the deployed function name.`
       );
     }
     throw new Error(payload.error || `Supabase Auth action failed: ${response.status}`);
@@ -802,7 +876,7 @@ function authMetadataFromProfile(user) {
 
 async function updateOwnSupabasePassword(member, password) {
   const client = getSupabaseClient();
-  if (!client) throw new Error("Supabase is not configured yet.");
+  if (!client) showAlert("Supabase is not configured yet.");
   const profile = {
     ...member,
     needsPasswordChange: false,
@@ -811,7 +885,7 @@ async function updateOwnSupabasePassword(member, password) {
     password,
     data: authMetadataFromProfile(profile),
   });
-  if (error) throw new Error(error.message || "Could not update your password.");
+  if (error) showAlert(error.message || "Could not update your password.");
   currentAuthSession = data?.session || getAuthSession();
   return data?.user || null;
 }
@@ -836,15 +910,15 @@ async function loadAuthUsersFromSupabase(manual = false) {
   };
 
   try {
-    const response = await fetch(
+    const response = await safeFetch(
       `${supabaseFunctionUrl(config)}?resource=users&id=${encodeURIComponent(config.stateId)}`,
       {
         headers,
       },
     );
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || `Supabase Auth users load failed: ${response.status}`);
-    if (payload.usersError) throw new Error(payload.usersError);
+    if (!response.ok) showAlert(payload.error || `Supabase Auth users load failed: ${response.status}`);
+    if (payload.usersError) showAlert(payload.usersError);
     db.users = Array.isArray(payload.users) ? payload.users.map(normalizeAuthUserProfile) : [];
     authUsersLoaded = true;
     currentUser = hasBackupAccess() ? backupAccessProfile() : getSessionUser();
@@ -876,6 +950,23 @@ async function signOutOfSupabaseAuth() {
   currentUser = null;
 }
 
+function setLoginButtonLoading(isLoading) {
+  const loginButton = document.querySelector("#login-form button[type='submit']");
+  if (!loginButton) return;
+  if (isLoading) {
+    if (!loginButton.dataset.originalHtml) {
+      loginButton.dataset.originalHtml = loginButton.innerHTML;
+    }
+    loginButton.disabled = true;
+    loginButton.innerHTML = `<span class="button-loader"></span> Signing in...`;
+  } else {
+    loginButton.disabled = false;
+    if (loginButton.dataset.originalHtml) {
+      loginButton.innerHTML = loginButton.dataset.originalHtml;
+    }
+  }
+}
+
 function wireLogin() {
   wireBackupAccessGesture();
   handlePublicEntryHash();
@@ -901,6 +992,10 @@ function wireLogin() {
         "Enter a password, or use Email sign-in link if this Supabase user has no password.";
       return;
     }
+
+    setLoginButtonLoading(true);
+    document.querySelector("#login-error").textContent = "";
+
     try {
       const user = await signInWithSupabaseAuth(email, password);
       await loadDbFromSupabase(true);
@@ -911,12 +1006,12 @@ function wireLogin() {
           "Supabase Auth accepted this login, but no matching member profile exists in the app data.";
         return;
       }
-      document.querySelector("#login-error").textContent = "";
       showAuthState();
       await maybeRunFirstLoginFlow();
     } catch (error) {
       document.querySelector("#login-error").textContent = error.message || "Email or password is incorrect.";
-      return;
+    } finally {
+      setLoginButtonLoading(false);
     }
   });
 
@@ -970,7 +1065,7 @@ async function openBackupAccessPrompt() {
   try {
     const backupPinHash = await sha256Hex(normalized);
     const result = await callSupabaseAuthAction("verify-backup-pin", { backupPinHash });
-    if (!result.ok) throw new Error("Backup PIN was rejected.");
+    if (!result.ok) showAlert("Backup PIN was rejected.");
     sessionStorage.setItem(BACKUP_PIN_SESSION_KEY, backupPinHash);
     currentUser = backupAccessProfile();
     currentView = "members";
@@ -1016,13 +1111,6 @@ function wireChrome() {
 
   document.querySelector("#logout")?.addEventListener("click", async () => {
     sessionStorage.removeItem(BACKUP_PIN_SESSION_KEY);
-    await signOutOfSupabaseAuth();
-    showAuthState();
-  });
-
-  document.querySelector("#reset-demo")?.addEventListener("click", async () => {
-    db = migrateDb({});
-    saveDb();
     await signOutOfSupabaseAuth();
     showAuthState();
   });
@@ -2894,16 +2982,14 @@ function formatDelta(delta) {
 
 function scheduleSupabaseAutosave() {
   const config = getSupabaseSyncConfig();
-  if (!supabaseInitialLoadDone || !config.enabled || !config.url || !config.anonKey) return;
+  if (supabaseLocked || !supabaseInitialLoadDone || !config.enabled || !config.url || !config.anonKey) return;
   clearTimeout(supabaseAutosaveTimer);
   supabaseAutosaveTimer = setTimeout(() => saveDbToSupabase(false), 1000);
 }
 
 function scheduleSupabaseRefresh() {
-  const config = getSupabaseSyncConfig();
-  if (!config.enabled || !config.url || !config.anonKey) return;
-  clearTimeout(supabaseRefreshTimer);
-  supabaseRefreshTimer = setTimeout(() => loadDbFromSupabase(false), SUPABASE_REFRESH_INTERVAL_MS);
+  // Automatic periodic refresh is disabled in favor of server-driven ping updates.
+  return;
 }
 
 async function loadDbFromSupabase(manual = false) {
@@ -2921,7 +3007,7 @@ async function loadDbFromSupabase(manual = false) {
   supabaseRemoteBusy = true;
   updateSupabaseStatus("Loading data from Supabase...");
   try {
-    const response = await fetch(`${supabaseFunctionUrl(config)}?id=${encodeURIComponent(config.stateId)}`, {
+    const response = await safeFetch(`${supabaseFunctionUrl(config)}?id=${encodeURIComponent(config.stateId)}`, {
       headers: supabaseHeaders(),
     });
     if (response.status === 404) {
@@ -2929,12 +3015,15 @@ async function loadDbFromSupabase(manual = false) {
       supabaseInitialLoadDone = true;
       return;
     }
-    if (!response.ok) throw new Error(`Supabase load failed: ${response.status}`);
+    if (!response.ok) showAlert(`Supabase load failed: ${response.status}`);
     const payload = await response.json();
+    supabaseLastKnownUpdatedAt = payload.updatedAt || supabaseLastKnownUpdatedAt;
     if (!payload.data) {
       db.users = Array.isArray(payload.users) ? payload.users.map(normalizeAuthUserProfile) : [];
       authUsersLoaded = Boolean(db.users.length);
       supabaseInitialLoadDone = true;
+      supabaseLocked = false;
+      startSupabasePing();
       updateSupabaseStatus(
         payload.usersError
           ? `Loaded app data, but Supabase Auth users could not be loaded: ${payload.usersError}`
@@ -2954,6 +3043,8 @@ async function loadDbFromSupabase(manual = false) {
       if (currentUser && viewRoot && viewTitle) render();
     }
     supabaseInitialLoadDone = true;
+    supabaseLocked = false;
+    startSupabasePing();
     updateSupabaseStatus(
       payload.usersError
         ? `Loaded app data, but Supabase Auth users could not be loaded: ${payload.usersError}`
@@ -2975,6 +3066,7 @@ async function saveDbToSupabase(manual = false) {
     updateSupabaseStatus("Supabase is missing a project URL or anon key.");
     return;
   }
+  if (supabaseLocked && !manual) return;
   if (supabaseRemoteBusy) {
     scheduleSupabaseAutosave();
     return;
@@ -2982,7 +3074,7 @@ async function saveDbToSupabase(manual = false) {
   supabaseRemoteBusy = true;
   updateSupabaseStatus("Saving data to Supabase...");
   try {
-    const response = await fetch(supabaseFunctionUrl(config), {
+    const response = await safeFetch(supabaseFunctionUrl(config), {
       method: "POST",
       headers: {
         ...supabaseHeaders(),
@@ -2994,8 +3086,10 @@ async function saveDbToSupabase(manual = false) {
         ...(hasBackupAccess() ? { backupPinHash: getBackupPinHash() } : {}),
       }),
     });
-    if (!response.ok) throw new Error(`Supabase save failed: ${response.status}`);
+    if (!response.ok) showAlert(`Supabase save failed: ${response.status}`);
     supabaseInitialLoadDone = true;
+    supabaseLocked = false;
+    startSupabasePing();
     updateSupabaseStatus(`Saved to Supabase ${formatDate(new Date().toISOString())}.`);
   } catch (error) {
     updateSupabaseStatus(error.message || "Supabase save failed.");
@@ -3061,7 +3155,7 @@ async function syncDbToGitHub(manual = false) {
   updateGitSyncStatus("Syncing app data to GitHub...");
   try {
     const apiUrl = `https://api.github.com/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/contents/${config.path}`;
-    const current = await fetch(`${apiUrl}?ref=${encodeURIComponent(config.branch)}`, {
+    const current = await safeFetch(`${apiUrl}?ref=${encodeURIComponent(config.branch)}`, {
       headers: githubHeaders(config.token),
     });
     let sha = null;
@@ -3069,10 +3163,10 @@ async function syncDbToGitHub(manual = false) {
       const file = await current.json();
       sha = file.sha;
     } else if (current.status !== 404) {
-      throw new Error(`GitHub read failed: ${current.status}`);
+      showAlert(`GitHub read failed: ${current.status}`);
     }
 
-    const response = await fetch(apiUrl, {
+    const response = await safeFetch(apiUrl, {
       method: "PUT",
       headers: githubHeaders(config.token),
       body: JSON.stringify({
@@ -3082,7 +3176,7 @@ async function syncDbToGitHub(manual = false) {
         ...(sha ? { sha } : {}),
       }),
     });
-    if (!response.ok) throw new Error(`GitHub write failed: ${response.status}`);
+    if (!response.ok) showAlert(`GitHub write failed: ${response.status}`);
     updateGitSyncStatus(`Last synced ${formatDate(new Date().toISOString())}.`);
   } catch (error) {
     updateGitSyncStatus(error.message || "Git autosave failed.");
