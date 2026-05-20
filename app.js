@@ -861,7 +861,7 @@ async function callSupabaseAuthAction(action, body) {
   if (!response.ok) {
     if (response.status === 404) {
       throw new Error(
-        `Supabase could not find the Edge Function "${config.functionName}" at ${supabaseFunctionUrl(config)}. Deploy it to project jpfipvcwxwaxehgmjlne or update supabase-config.js to the deployed function name.`
+        `This user does not exist.`
       );
     }
     throw new Error(payload.error || `Supabase Auth action failed: ${response.status}`);
