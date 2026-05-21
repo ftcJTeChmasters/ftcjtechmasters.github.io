@@ -1971,12 +1971,17 @@ function renderMeetings() {
 
 async function handleCreateMeeting(event) {
   event.preventDefault();
+  let formEl = event.currentTarget ?? event.target;
+  if (!(formEl instanceof HTMLFormElement)) {
+    formEl = document.querySelector("#meeting-form");
+  }
   const confirmed = await showConfirm(
     "Create this meeting? Members will be able to mark their attendance.",
     "Create Meeting"
   );
   if (!confirmed) return;
-  const form = new FormData(event.currentTarget);
+  if (!(formEl instanceof HTMLFormElement)) return;
+  const form = new FormData(formEl);
   const scope = currentUser.role === "Section Head" ? currentUser.section : form.get("scope");
   const subsection = scope === "Global" ? "All" : form.get("subsection");
   db.meetings.push({
