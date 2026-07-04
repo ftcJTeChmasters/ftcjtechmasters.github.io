@@ -2004,11 +2004,16 @@ function renderMeetings() {
 
 async function handleCreateMeeting(event) {
   event.preventDefault();
+  let formEl = event.currentTarget ?? event.target;
+  if (!(formEl instanceof HTMLFormElement)) {
+    formEl = document.querySelector("#meeting-form");
+  }
   const confirmed = await showConfirm(
     "Create this meeting? Members will be able to mark their attendance.",
     "Create Meeting"
   );
   if (!confirmed) return;
+<<<<<<< HEAD
   const form = new FormData(event.currentTarget);
   const title = form.get("title").trim();
   if (!title) {
@@ -2021,6 +2026,10 @@ async function handleCreateMeeting(event) {
     await showAlert("Please enter a valid date and time.", "Invalid Date");
     return;
   }
+=======
+  if (!(formEl instanceof HTMLFormElement)) return;
+  const form = new FormData(formEl);
+>>>>>>> ffde7c27b37d0bc6e544324cc56b453904c5125e
   const scope = currentUser.role === "Section Head" ? currentUser.section : form.get("scope");
   const subsection = scope === "Global" ? "All" : form.get("subsection");
   db.meetings.push({
