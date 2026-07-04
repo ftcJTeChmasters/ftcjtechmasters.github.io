@@ -914,6 +914,7 @@ function authMetadataFromProfile(user) {
     portfolio: Array.isArray(user.portfolio) ? user.portfolio : [],
     activityLog: Array.isArray(user.activityLog) ? user.activityLog : [],
     needsPasswordChange: Boolean(user.needsPasswordChange),
+    isSiteManager: Boolean(user.isSiteManager),
     invalidPasswordAttempts: Number(user.invalidPasswordAttempts ?? 0),
     lockoutCount: Number(user.lockoutCount ?? 0),
     lockoutUntil: user.lockoutUntil ?? null,
@@ -1197,10 +1198,17 @@ function showAuthState() {
 function updateNavVisibility() {
   const hideForMembers = currentUser?.role === "Member";
   document.querySelectorAll(".nav-item").forEach((button) => {
-    const memberHiddenViews = ["members", "site"];
-    button.hidden = hideForMembers && memberHiddenViews.includes(button.dataset.view);
+    let shouldHide = false;
+    if (hideForMembers) {
+      if (button.dataset.view === "members") shouldHide = true;
+      if (button.dataset.view === "site" && !currentUser?.isSiteManager) shouldHide = true;
+    }
+    button.hidden = shouldHide;
   });
-  if (hideForMembers && ["members", "site"].includes(currentView)) {
+  if (hideForMembers && currentView === "members") {
+    currentView = "dashboard";
+  }
+  if (hideForMembers && currentView === "site" && !currentUser?.isSiteManager) {
     currentView = "dashboard";
   }
 }
@@ -1683,6 +1691,7 @@ function renderMembersTable(members, editable) {
                       currentUser.role === "Coach" && member.id !== currentUser.id
                         ? `<button class="small-btn outside-credit" data-member="${member.id}" ${hasOutsideCreditToday(member) ? "disabled" : ""}><i data-lucide="plus"></i>Outside +${OUTSIDE_MEETING_DELTA}</button>
                           <button class="small-btn reset-password" data-member="${member.id}"><i data-lucide="key-round"></i>Set password</button>
+                          <button class="small-btn toggle-sitemanager" data-member="${member.id}"><i data-lucide="${member.isSiteManager ? "check-square" : "square"}"></i>Site Manager</button>
                           ${unlockButton}
                           <button class="danger-btn remove-member" data-member="${member.id}"><i data-lucide="trash-2"></i>Remove</button>`
                         : ""
@@ -1750,6 +1759,25 @@ function wireMemberTable() {
     });
   });
 
+  document.querySelectorAll(".toggle-sitemanager").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (currentUser.role !== "Coach") return;
+      const member = db.users.find((user) => user.id === button.dataset.member);
+      if (!member) return;
+      member.isSiteManager = !member.isSiteManager;
+      button.innerHTML = `<i data-lucide="${member.isSiteManager ? "check-square" : "square"}"></i>Site Manager`;
+      refreshIcons();
+      try {
+        await saveAuthProfile(member);
+      } catch (error) {
+        member.isSiteManager = !member.isSiteManager;
+        button.innerHTML = `<i data-lucide="${member.isSiteManager ? "check-square" : "square"}"></i>Site Manager`;
+        refreshIcons();
+        await showAlert("Could not update Site Manager status. " + (error.message || ""));
+      }
+    });
+  });
+
   document.querySelectorAll(".reset-password").forEach((button) => {
     button.addEventListener("click", async () => {
       if (currentUser.role !== "Coach") return;
@@ -1805,6 +1833,11 @@ async function handleCreateUser(event) {
     return;
   }
   const form = new FormData(event.currentTarget);
+  const name = form.get("name").trim();
+  if (!name) {
+    await showAlert("Please enter a name for the member.", "Missing Name");
+    return;
+  }
   const email = form.get("email").trim().toLowerCase();
   if (db.users.some((user) => user.email.toLowerCase() === email)) {
     await showAlert("A user with that email already exists.", "Duplicate Email");
@@ -1977,12 +2010,23 @@ async function handleCreateMeeting(event) {
   );
   if (!confirmed) return;
   const form = new FormData(event.currentTarget);
+  const title = form.get("title").trim();
+  if (!title) {
+    await showAlert("Please enter a title for the meeting.", "Missing Title");
+    return;
+  }
+  const startsAtInput = form.get("startsAt");
+  const parsedDate = new Date(startsAtInput);
+  if (Number.isNaN(parsedDate.getTime())) {
+    await showAlert("Please enter a valid date and time.", "Invalid Date");
+    return;
+  }
   const scope = currentUser.role === "Section Head" ? currentUser.section : form.get("scope");
   const subsection = scope === "Global" ? "All" : form.get("subsection");
   db.meetings.push({
     id: crypto.randomUUID(),
-    title: form.get("title").trim(),
-    startsAt: new Date(form.get("startsAt")).toISOString(),
+    title,
+    startsAt: parsedDate.toISOString(),
     scope,
     subsection,
     createdBy: currentUser.id,
@@ -2140,99 +2184,128 @@ function renderAgenda() {
   );
 }
 
+let currentMessageTab = "inbox";
+
 function renderMessages() {
   const audienceKinds = messageAudienceKindOptions();
-  const messages = visibleMessagesFor(currentUser)
-    .sort((a, b) => new Date(a.at) - new Date(b.at));
+  const allMessages = visibleMessagesFor(currentUser).sort((a, b) => new Date(b.at) - new Date(a.at));
+  
+  const inboxMessages = allMessages.filter(m => m.fromId !== currentUser.id);
+  const sentMessages = allMessages.filter(m => m.fromId === currentUser.id);
+
+  let tabContent = "";
+  if (currentMessageTab === "inbox") {
+    tabContent = panel("Inbox", `<div class="list message-thread">${renderMessageList(inboxMessages)}</div>`);
+  } else if (currentMessageTab === "sent") {
+    tabContent = panel("Sent", `<div class="list message-thread">${renderMessageList(sentMessages)}</div>`);
+  } else if (currentMessageTab === "compose") {
+    tabContent = panel(
+      "Compose Message",
+      `<form id="message-form" class="form-grid">
+        <label>General<select name="audienceKind">${renderOptions(audienceKinds)}</select></label>
+        <label data-message-field="section-picker">Section<select name="sectionTarget">${renderOptions(sectionSelectOptions())}</select></label>
+        <label data-message-field="subsection-picker">Subsection<select name="subsectionTarget">${renderOptions(subsectionSelectOptions(sections[0]))}</select></label>
+        <label data-message-field="private-picker" hidden>Person<select name="privateTarget">${renderOptions(privateUserOptions(sections[0]))}</select></label>
+        <label class="full">Message<textarea name="body" required></textarea></label>
+        <button class="primary-btn full" type="submit"><i data-lucide="send"></i>Send</button>
+      </form>`
+    );
+  }
+
   viewRoot.innerHTML = `
-    <div class="grid two">
-      ${panel(
-        "Send Message",
-        `<form id="message-form" class="form-grid">
-          <label>Algemeen<select name="audienceKind">${renderOptions(audienceKinds)}</select></label>
-          <label data-message-field="section-picker">Section<select name="sectionTarget">${renderOptions(sectionSelectOptions())}</select></label>
-          <label data-message-field="subsection-picker">Subsection<select name="subsectionTarget">${renderOptions(subsectionSelectOptions(sections[0]))}</select></label>
-          <label data-message-field="private-picker" hidden>Person<select name="privateTarget">${renderOptions(privateUserOptions(sections[0]))}</select></label>
-          <label class="full">Message<textarea name="body" required></textarea></label>
-          <button class="primary-btn full" type="submit"><i data-lucide="send"></i>Send</button>
-        </form>`,
-      )}
-      ${panel("Thread", `<div class="list message-thread">${renderMessageList(messages)}</div>`)}
+    <div class="message-tabs toolbar">
+      <button class="${currentMessageTab === "inbox" ? "primary-btn" : "secondary-btn"} msg-tab" data-tab="inbox"><i data-lucide="inbox"></i>Inbox</button>
+      <button class="${currentMessageTab === "sent" ? "primary-btn" : "secondary-btn"} msg-tab" data-tab="sent"><i data-lucide="send"></i>Sent</button>
+      <button class="${currentMessageTab === "compose" ? "primary-btn" : "secondary-btn"} msg-tab" data-tab="compose"><i data-lucide="edit"></i>Compose</button>
+    </div>
+    <div class="grid full">
+      ${tabContent}
     </div>
   `;
-  const messageForm = document.querySelector("#message-form");
-  const updateAudienceFields = () => {
-    const kind = messageForm.elements.audienceKind.value;
-    const section = messageForm.elements.sectionTarget.value;
-    document.querySelectorAll("[data-message-field]").forEach((field) => {
-      const key = field.dataset.messageField;
-      const shouldHide =
-        kind === "team" ||
-        (kind === "section" && key === "private-picker") ||
-        (kind === "private" && key === "subsection-picker");
-      field.hidden = shouldHide;
-      field.classList.toggle("hidden", shouldHide);
-      field.querySelectorAll("select").forEach((select) => {
-        select.disabled = shouldHide;
+
+  document.querySelectorAll(".msg-tab").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      currentMessageTab = e.currentTarget.dataset.tab;
+      renderMessages();
+    });
+  });
+
+  if (currentMessageTab === "compose") {
+    const messageForm = document.querySelector("#message-form");
+    const updateAudienceFields = () => {
+      const kind = messageForm.elements.audienceKind.value;
+      const section = messageForm.elements.sectionTarget.value;
+      document.querySelectorAll("[data-message-field]").forEach((field) => {
+        const key = field.dataset.messageField;
+        const shouldHide =
+          kind === "team" ||
+          (kind === "section" && key === "private-picker") ||
+          (kind === "private" && key === "subsection-picker");
+        field.hidden = shouldHide;
+        field.classList.toggle("hidden", shouldHide);
+        field.querySelectorAll("select").forEach((select) => {
+          select.disabled = shouldHide;
+        });
       });
+      if (kind === "private") {
+        messageForm.elements.privateTarget.innerHTML = renderOptions(privateUserOptions(section));
+      }
+      if (kind === "section") {
+        messageForm.elements.subsectionTarget.innerHTML = renderOptions(subsectionSelectOptions(section));
+      }
+    };
+    messageForm.elements.audienceKind.addEventListener("change", () => {
+      updateAudienceFields();
     });
-    if (kind === "private") {
-      messageForm.elements.privateTarget.innerHTML = renderOptions(privateUserOptions(section));
-    }
-    if (kind === "section") {
-      messageForm.elements.subsectionTarget.innerHTML = renderOptions(subsectionSelectOptions(section));
-    }
-  };
-  messageForm.elements.audienceKind.addEventListener("change", () => {
-    updateAudienceFields();
-  });
-  messageForm.elements.sectionTarget.addEventListener("change", () => {
-    messageForm.elements.subsectionTarget.innerHTML = renderOptions(
-      subsectionSelectOptions(messageForm.elements.sectionTarget.value),
-    );
-    messageForm.elements.privateTarget.innerHTML = renderOptions(
-      privateUserOptions(messageForm.elements.sectionTarget.value),
-    );
-  });
-  updateAudienceFields();
-  document.querySelector("#message-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const audience = parseMessageAudience(
-      form.get("audienceKind"),
-      form.get("sectionTarget"),
-      form.get("subsectionTarget"),
-      form.get("privateTarget"),
-    );
-    if (!audience) {
-      await showAlert("Choose a valid message target.", "Invalid Target");
-      return;
-    }
-    const recipients = messageRecipientsForAudience(audience).filter((user) => user.id !== currentUser.id);
-    if (!recipients.length) {
-      await showAlert("No recipients match that audience.", "No Recipients");
-      return;
-    }
-    if (audience.type === "team") {
-      const confirmed = await showConfirm(
-        `Send this message to the entire team (${recipients.length} recipients)?`,
-        "Send to Whole Team"
+    messageForm.elements.sectionTarget.addEventListener("change", () => {
+      messageForm.elements.subsectionTarget.innerHTML = renderOptions(
+        subsectionSelectOptions(messageForm.elements.sectionTarget.value),
       );
-      if (!confirmed) return;
-    }
-    db.messages.push({
-      id: crypto.randomUUID(),
-      fromId: currentUser.id,
-      toId: audience.userId || null,
-      audience,
-      recipientIds: recipients.map((user) => user.id),
-      at: new Date().toISOString(),
-      body: form.get("body").trim(),
-      read: false,
+      messageForm.elements.privateTarget.innerHTML = renderOptions(
+        privateUserOptions(messageForm.elements.sectionTarget.value),
+      );
     });
-    saveDb();
-    renderMessages();
-  });
+    updateAudienceFields();
+    document.querySelector("#message-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = new FormData(event.currentTarget);
+      const audience = parseMessageAudience(
+        form.get("audienceKind"),
+        form.get("sectionTarget"),
+        form.get("subsectionTarget"),
+        form.get("privateTarget"),
+      );
+      if (!audience) {
+        await showAlert("Choose a valid message target.", "Invalid Target");
+        return;
+      }
+      const recipients = messageRecipientsForAudience(audience).filter((user) => user.id !== currentUser.id);
+      if (!recipients.length) {
+        await showAlert("No recipients match that audience.", "No Recipients");
+        return;
+      }
+      if (audience.type === "team") {
+        const confirmed = await showConfirm(
+          `Send this message to the entire team (${recipients.length} recipients)?`,
+          "Send to Whole Team"
+        );
+        if (!confirmed) return;
+      }
+      db.messages.push({
+        id: crypto.randomUUID(),
+        fromId: currentUser.id,
+        toId: audience.userId || null,
+        audience,
+        recipientIds: recipients.map((user) => user.id),
+        at: new Date().toISOString(),
+        body: form.get("body").trim(),
+        read: false,
+      });
+      saveDb();
+      currentMessageTab = "sent";
+      renderMessages();
+    });
+  }
 }
 
 function renderPortfolio() {
@@ -2254,7 +2327,7 @@ function renderPortfolio() {
         <button class="primary-btn full" type="submit"><i data-lucide="folder-plus"></i>Add entry</button>
       </form>`,
     )}
-    ${panel("Portfolio Entries", renderPortfolioEntries(targetMembers))}
+    ${panel("Portfolio Entries", renderPortfolioEntries(db.users))}
   `;
   document.querySelector("#portfolio-form").addEventListener("submit", (event) => {
     event.preventDefault();
@@ -2262,7 +2335,6 @@ function renderPortfolio() {
     const memberId = currentUser.role === "Coach" ? form.get("memberId") : currentUser.id;
     const member = db.users.find((user) => user.id === memberId);
     if (!member) return;
-    if (currentUser.role !== "Coach" && member.id !== currentUser.id) return;
     member.portfolio.unshift({
       id: crypto.randomUUID(),
       date: form.get("date"),

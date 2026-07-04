@@ -86,7 +86,8 @@ as $$
         end,
         'portfolio', coalesce(users.raw_user_meta_data->'portfolio', '[]'::jsonb),
         'activityLog', coalesce(users.raw_user_meta_data->'activityLog', '[]'::jsonb),
-        'needsPasswordChange', lower(coalesce(users.raw_user_meta_data->>'needsPasswordChange', 'false')) = 'true'
+        'needsPasswordChange', lower(coalesce(users.raw_user_meta_data->>'needsPasswordChange', 'false')) = 'true',
+        'isSiteManager', lower(coalesce(users.raw_user_meta_data->>'isSiteManager', 'false')) = 'true'
       )
       order by lower(coalesce(users.email, ''))
     ),
