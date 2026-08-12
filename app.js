@@ -2013,7 +2013,6 @@ async function handleCreateMeeting(event) {
     "Create Meeting"
   );
   if (!confirmed) return;
-<<<<<<< HEAD
   const form = new FormData(event.currentTarget);
   const title = form.get("title").trim();
   if (!title) {
@@ -2026,10 +2025,8 @@ async function handleCreateMeeting(event) {
     await showAlert("Please enter a valid date and time.", "Invalid Date");
     return;
   }
-=======
   if (!(formEl instanceof HTMLFormElement)) return;
   const form = new FormData(formEl);
->>>>>>> ffde7c27b37d0bc6e544324cc56b453904c5125e
   const scope = currentUser.role === "Section Head" ? currentUser.section : form.get("scope");
   const subsection = scope === "Global" ? "All" : form.get("subsection");
   db.meetings.push({
@@ -2193,54 +2190,160 @@ function renderAgenda() {
   );
 }
 
-let currentMessageTab = "inbox";
+let currentActiveThreadId = null;
+let isComposingMessage = false;
+
+function getMessageThreadId(message) {
+  const audience = message.audience || { type: "user", userId: message.toId };
+  if (audience.type === "team") return "team";
+  if (audience.type === "section") return `section:${audience.section}`;
+  if (audience.type === "subsection") return `subsection:${audience.section}:${audience.subsection}`;
+  const otherId = message.fromId === currentUser.id ? audience.userId : message.fromId;
+  const ids = [currentUser.id, otherId].sort();
+  return `private:${ids[0]}:${ids[1]}`;
+}
+
+function getMessageThreadName(message) {
+  const audience = message.audience || { type: "user", userId: message.toId };
+  if (audience.type === "team") return "Team Announcements";
+  if (audience.type === "section") return `${audience.section} Section`;
+  if (audience.type === "subsection") return `${audience.section} / ${audience.subsection}`;
+  const otherId = message.fromId === currentUser.id ? audience.userId : message.fromId;
+  const otherUser = db.users.find(u => u.id === otherId);
+  return otherUser ? otherUser.name : "Unknown User";
+}
 
 function renderMessages() {
-  const audienceKinds = messageAudienceKindOptions();
-  const allMessages = visibleMessagesFor(currentUser).sort((a, b) => new Date(b.at) - new Date(a.at));
+  const allMessages = visibleMessagesFor(currentUser).sort((a, b) => new Date(a.at) - new Date(b.at));
   
-  const inboxMessages = allMessages.filter(m => m.fromId !== currentUser.id);
-  const sentMessages = allMessages.filter(m => m.fromId === currentUser.id);
-
-  let tabContent = "";
-  if (currentMessageTab === "inbox") {
-    tabContent = panel("Inbox", `<div class="list message-thread">${renderMessageList(inboxMessages)}</div>`);
-  } else if (currentMessageTab === "sent") {
-    tabContent = panel("Sent", `<div class="list message-thread">${renderMessageList(sentMessages)}</div>`);
-  } else if (currentMessageTab === "compose") {
-    tabContent = panel(
-      "Compose Message",
-      `<form id="message-form" class="form-grid">
-        <label>General<select name="audienceKind">${renderOptions(audienceKinds)}</select></label>
-        <label data-message-field="section-picker">Section<select name="sectionTarget">${renderOptions(sectionSelectOptions())}</select></label>
-        <label data-message-field="subsection-picker">Subsection<select name="subsectionTarget">${renderOptions(subsectionSelectOptions(sections[0]))}</select></label>
-        <label data-message-field="private-picker" hidden>Person<select name="privateTarget">${renderOptions(privateUserOptions(sections[0]))}</select></label>
-        <label class="full">Message<textarea name="body" required></textarea></label>
-        <button class="primary-btn full" type="submit"><i data-lucide="send"></i>Send</button>
-      </form>`
-    );
+  const threadsMap = new Map();
+  for (const msg of allMessages) {
+    const threadId = getMessageThreadId(msg);
+    if (!threadsMap.has(threadId)) {
+      threadsMap.set(threadId, {
+        id: threadId,
+        name: getMessageThreadName(msg),
+        messages: [],
+        lastMessageAt: msg.at
+      });
+    }
+    threadsMap.get(threadId).messages.push(msg);
+    threadsMap.get(threadId).lastMessageAt = msg.at;
   }
 
-  viewRoot.innerHTML = `
-    <div class="message-tabs toolbar">
-      <button class="${currentMessageTab === "inbox" ? "primary-btn" : "secondary-btn"} msg-tab" data-tab="inbox"><i data-lucide="inbox"></i>Inbox</button>
-      <button class="${currentMessageTab === "sent" ? "primary-btn" : "secondary-btn"} msg-tab" data-tab="sent"><i data-lucide="send"></i>Sent</button>
-      <button class="${currentMessageTab === "compose" ? "primary-btn" : "secondary-btn"} msg-tab" data-tab="compose"><i data-lucide="edit"></i>Compose</button>
+  const threads = Array.from(threadsMap.values()).sort((a, b) => new Date(b.lastMessageAt) - new Date(a.lastMessageAt));
+
+  if (!isComposingMessage && !currentActiveThreadId && threads.length > 0) {
+    currentActiveThreadId = threads[0].id;
+  }
+
+  const sidebarHtml = `
+    <div class="chat-sidebar-header">
+      <button id="chat-compose-btn" class="primary-btn full"><i data-lucide="edit"></i>New Message</button>
     </div>
-    <div class="grid full">
-      ${tabContent}
+    <div class="chat-thread-list">
+      ${threads.map(t => `
+        <div class="chat-thread-item ${!isComposingMessage && currentActiveThreadId === t.id ? "active" : ""}" data-thread-id="${t.id}">
+          <strong>${escapeHtml(t.name)}</strong>
+          <span class="muted" style="font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+            ${t.messages.length > 0 ? escapeHtml(t.messages[t.messages.length - 1].body) : ""}
+          </span>
+        </div>
+      `).join("")}
+      ${threads.length === 0 ? `<div class="empty-state">No conversations yet.</div>` : ""}
     </div>
   `;
 
-  document.querySelectorAll(".msg-tab").forEach(btn => {
-    btn.addEventListener("click", (e) => {
-      currentMessageTab = e.currentTarget.dataset.tab;
+  let mainHtml = "";
+  if (isComposingMessage) {
+    const audienceKinds = messageAudienceKindOptions();
+    mainHtml = `
+      <div class="chat-main-header">
+        <h3>New Message</h3>
+      </div>
+      <div class="chat-compose-area" style="flex: 1;">
+        <form id="message-form" class="form-grid">
+          <label>General<select name="audienceKind">${renderOptions(audienceKinds)}</select></label>
+          <label data-message-field="section-picker">Section<select name="sectionTarget">${renderOptions(sectionSelectOptions())}</select></label>
+          <label data-message-field="subsection-picker">Subsection<select name="subsectionTarget">${renderOptions(subsectionSelectOptions(sections[0]))}</select></label>
+          <label data-message-field="private-picker" hidden>Person<select name="privateTarget">${renderOptions(privateUserOptions(sections[0]))}</select></label>
+          <label class="full">Message<textarea name="body" rows="6" required></textarea></label>
+          <button class="primary-btn full" type="submit"><i data-lucide="send"></i>Send Message</button>
+        </form>
+      </div>
+    `;
+  } else if (currentActiveThreadId && threadsMap.has(currentActiveThreadId)) {
+    const activeThread = threadsMap.get(currentActiveThreadId);
+    mainHtml = `
+      <div class="chat-main-header">
+        <h3>${escapeHtml(activeThread.name)}</h3>
+        <button class="secondary-btn small-btn" id="chat-reply-btn" data-thread-id="${activeThread.id}"><i data-lucide="reply"></i>Reply</button>
+      </div>
+      <div class="chat-messages-area">
+        ${renderMessageList(activeThread.messages)}
+      </div>
+    `;
+  } else {
+    mainHtml = `<div class="empty-state" style="margin: auto;">Select a conversation or start a new message.</div>`;
+  }
+
+  viewRoot.innerHTML = `
+    <div class="chat-layout">
+      <div class="chat-sidebar">
+        ${sidebarHtml}
+      </div>
+      <div class="chat-main">
+        ${mainHtml}
+      </div>
+    </div>
+  `;
+
+  document.querySelectorAll(".chat-thread-item").forEach(item => {
+    item.addEventListener("click", () => {
+      currentActiveThreadId = item.dataset.threadId;
+      isComposingMessage = false;
       renderMessages();
     });
   });
 
-  if (currentMessageTab === "compose") {
+  document.getElementById("chat-compose-btn")?.addEventListener("click", () => {
+    isComposingMessage = true;
+    renderMessages();
+  });
+
+  document.getElementById("chat-reply-btn")?.addEventListener("click", () => {
+    isComposingMessage = true;
+    renderMessages();
+  });
+
+  if (isComposingMessage) {
     const messageForm = document.querySelector("#message-form");
+    
+    // Auto-fill logic for reply
+    if (currentActiveThreadId && threadsMap.has(currentActiveThreadId)) {
+      const parts = currentActiveThreadId.split(":");
+      const type = parts[0];
+      if (type === "team") messageForm.elements.audienceKind.value = "team";
+      else if (type === "section") {
+        messageForm.elements.audienceKind.value = "section";
+        messageForm.elements.sectionTarget.value = parts[1];
+      } else if (type === "subsection") {
+        messageForm.elements.audienceKind.value = "subsection";
+        messageForm.elements.sectionTarget.value = parts[1];
+        messageForm.elements.subsectionTarget.innerHTML = renderOptions(subsectionSelectOptions(parts[1]));
+        messageForm.elements.subsectionTarget.value = parts[2];
+      } else if (type === "private") {
+        messageForm.elements.audienceKind.value = "private";
+        const otherId = parts[1] === currentUser.id ? parts[2] : parts[1];
+        const otherUser = db.users.find(u => u.id === otherId);
+        if (otherUser) {
+          messageForm.elements.sectionTarget.value = otherUser.section;
+          messageForm.elements.privateTarget.innerHTML = renderOptions(privateUserOptions(otherUser.section));
+          messageForm.elements.privateTarget.value = otherId;
+        }
+      }
+    }
+
     const updateAudienceFields = () => {
       const kind = messageForm.elements.audienceKind.value;
       const section = messageForm.elements.sectionTarget.value;
@@ -2256,16 +2359,15 @@ function renderMessages() {
           select.disabled = shouldHide;
         });
       });
-      if (kind === "private") {
-        messageForm.elements.privateTarget.innerHTML = renderOptions(privateUserOptions(section));
-      }
-      if (kind === "section") {
-        messageForm.elements.subsectionTarget.innerHTML = renderOptions(subsectionSelectOptions(section));
-      }
     };
+
     messageForm.elements.audienceKind.addEventListener("change", () => {
+      const section = messageForm.elements.sectionTarget.value;
+      messageForm.elements.privateTarget.innerHTML = renderOptions(privateUserOptions(section));
+      messageForm.elements.subsectionTarget.innerHTML = renderOptions(subsectionSelectOptions(section));
       updateAudienceFields();
     });
+    
     messageForm.elements.sectionTarget.addEventListener("change", () => {
       messageForm.elements.subsectionTarget.innerHTML = renderOptions(
         subsectionSelectOptions(messageForm.elements.sectionTarget.value),
@@ -2275,7 +2377,8 @@ function renderMessages() {
       );
     });
     updateAudienceFields();
-    document.querySelector("#message-form").addEventListener("submit", async (event) => {
+
+    messageForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const form = new FormData(event.currentTarget);
       const audience = parseMessageAudience(
@@ -2300,7 +2403,7 @@ function renderMessages() {
         );
         if (!confirmed) return;
       }
-      db.messages.push({
+      const newMessage = {
         id: crypto.randomUUID(),
         fromId: currentUser.id,
         toId: audience.userId || null,
@@ -2309,9 +2412,12 @@ function renderMessages() {
         at: new Date().toISOString(),
         body: form.get("body").trim(),
         read: false,
-      });
+      };
+      db.messages.push(newMessage);
       saveDb();
-      currentMessageTab = "sent";
+      
+      isComposingMessage = false;
+      currentActiveThreadId = getMessageThreadId(newMessage);
       renderMessages();
     });
   }
@@ -3094,11 +3200,17 @@ function renderMessageList(messages) {
   return messages
     .map((message) => {
       const sender = db.users.find((user) => user.id === message.fromId);
-      const audienceLabel = messageAudienceLabel(message);
-      return `<div class="message ${message.fromId === currentUser.id ? "mine" : ""}">
-        <strong>${escapeHtml(sender?.name || "Unknown")} to ${escapeHtml(audienceLabel)}</strong>
-        <p>${escapeHtml(message.body)}</p>
-        <small>${formatDate(message.at)}</small>
+      const isMine = message.fromId === currentUser.id;
+      const name = sender?.name || "Unknown";
+      const initials = name.split(" ").map(n => n[0]).join("").substring(0, 2).toUpperCase();
+      return `<div class="chat-bubble-wrapper ${isMine ? "mine" : ""}">
+        <div class="chat-avatar">${initials}</div>
+        <div>
+          <div class="chat-bubble">
+            ${escapeHtml(message.body)}
+          </div>
+          <div class="chat-meta">${escapeHtml(name)} • ${formatDate(message.at)}</div>
+        </div>
       </div>`;
     })
     .join("");
