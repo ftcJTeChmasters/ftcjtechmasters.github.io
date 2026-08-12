@@ -10,3 +10,5 @@ supabase/.temp/
 supabase-backend.sql
 supabase-config.js
 supabase/config.toml
+supabase/functions/app-state/index.ts
+supabase/
