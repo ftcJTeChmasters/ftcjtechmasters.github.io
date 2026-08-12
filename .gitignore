@@ -7,6 +7,9 @@ node_modules/
 Thumbs.db
 .supabase/
 supabase/.temp/
+supabase/.cache/
+supabase/.config/
+supabase/functions/
 supabase-backend.sql
 supabase-config.js
 supabase/config.toml
