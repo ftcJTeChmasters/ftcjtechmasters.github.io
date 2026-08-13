@@ -2026,7 +2026,7 @@ async function handleCreateMeeting(event) {
     return;
   }
   if (!(formEl instanceof HTMLFormElement)) return;
-  const form = new FormData(formEl);
+  form = new FormData(formEl);
   const scope = currentUser.role === "Section Head" ? currentUser.section : form.get("scope");
   const subsection = scope === "Global" ? "All" : form.get("subsection");
   db.meetings.push({
