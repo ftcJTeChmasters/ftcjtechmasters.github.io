@@ -11,7 +11,6 @@ supabase/.cache/
 supabase/.config/
 supabase/functions/
 supabase-backend.sql
-supabase-config.js
 supabase/config.toml
 supabase/functions/app-state/index.ts
 supabase/
